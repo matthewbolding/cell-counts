@@ -1,0 +1,5 @@
+cellpose>=4.0
+tifffile
+scikit-image
+pillow
+numpy
