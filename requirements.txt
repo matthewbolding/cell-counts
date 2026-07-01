@@ -1,3 +1,13 @@
+# --- torch: install the RIGHT wheel for your platform FIRST, then the rest ---
+#
+# Linux/Windows + NVIDIA (WSL2, RTX 3080 Ti):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+#
+# macOS Apple Silicon (M1/M2/M3/M4) — plain wheel includes Metal/MPS, no index URL:
+#   pip install torch
+#
+# Then, on either platform:
+#   pip install -r requirements.txt
 cellpose>=4.0
 tifffile
 scikit-image

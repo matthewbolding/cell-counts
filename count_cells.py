@@ -43,9 +43,14 @@ import argparse
 import csv
 import html
 import logging
+import os
 import sys
 import warnings
 from pathlib import Path
+
+# On Apple Silicon, let unsupported MPS ops fall back to CPU instead of crashing.
+# Harmless on CUDA/CPU. Must be set before torch is imported.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import numpy as np
 import tifffile
@@ -240,7 +245,9 @@ def main(argv=None) -> int:
     ap.add_argument("--outline-thickness", type=int, default=1, help="overlay outline thickness")
     ap.add_argument("--dots", action="store_true", help="also mark centroids on the overlay")
     ap.add_argument("--limit", type=int, default=0, help="process at most N images (0=all)")
-    ap.add_argument("--cpu", action="store_true", help="force CPU even if CUDA is present")
+    ap.add_argument("--cpu", action="store_true", help="force CPU even if a GPU is present")
+    ap.add_argument("--fp32", action="store_true",
+                    help="disable bfloat16 weights (use if MPS produces bad/empty masks)")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -258,13 +265,24 @@ def main(argv=None) -> int:
     import torch
     from cellpose import models
 
-    use_gpu = (not args.cpu) and torch.cuda.is_available()
-    if use_gpu:
-        log.info("CUDA device: %s", torch.cuda.get_device_name(0))
-    else:
-        log.warning("Running on CPU%s — this will be slow.",
-                    "" if args.cpu else " (torch.cuda.is_available() is False)")
-    model = models.CellposeModel(gpu=use_gpu)
+    # Pick the best available accelerator: CUDA (NVIDIA) or MPS (Apple Silicon).
+    use_gpu = False
+    if not args.cpu:
+        if torch.cuda.is_available():
+            use_gpu = True
+            log.info("Accelerator: CUDA (%s)", torch.cuda.get_device_name(0))
+        elif torch.backends.mps.is_available():
+            use_gpu = True
+            log.info("Accelerator: Apple MPS (Metal)")
+    if not use_gpu:
+        reason = "" if args.cpu else " (no CUDA or MPS device found)"
+        log.warning("Running on CPU%s — this will be slow.", reason)
+
+    # Cellpose(gpu=True) routes to CUDA or MPS automatically via its device logic.
+    model_kwargs = {"gpu": use_gpu}
+    if args.fp32:
+        model_kwargs["use_bfloat16"] = False  # bf16 can misbehave on some MPS builds
+    model = models.CellposeModel(**model_kwargs)
 
     dirs = {"overlays": args.out / "overlays", "masks": args.out / "masks"}
     for d in (args.out, *dirs.values()):
