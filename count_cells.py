@@ -12,12 +12,25 @@ deliberately preferred over raw SAM: raw Segment-Anything has no concept of a
 objects. Cellpose-SAM keeps the SAM backbone but is trained on cellular data, so
 it both knows what a cell is and runs comfortably on an RTX 3080 Ti.
 
+Locality filter (--locality)
+----------------------------
+Real cells cluster; they are rarely alone in a dark void. So instead of raising
+--cellprob-threshold (which loses faint *real* cells too), keep the model
+permissive and drop detections that are spatially isolated afterward. Detections
+whose centroids are within a radius are joined into groups, and only groups with
+at least --locality-min-cluster members survive: the tissue is one huge group of
+thousands, while scattered background noise forms tiny islands that get removed.
+The radius is adaptive by default (a multiple of the median nearest-neighbour
+distance), so it self-scales to the image. Filtered detections are drawn in a
+distinct colour on the overlay so a human can confirm the filter isn't eating
+real cells.
+
 Outputs (under --out, default ./results):
-  report.csv            one row per image: filename, n_cells, shape, params
+  report.csv            one row per image: filename, n_cells, n_filtered, params
   report.html           thumbnail gallery (overlay + count) for fast eyeballing
-  overlays/<stem>.png   sister image: contrast-stretched original with each
-                        detected cell outlined (and optionally a centroid dot)
-  masks/<stem>.tif      raw uint16/uint32 label image (re-openable in ImageJ/QuPath)
+  overlays/<stem>.png   sister image: contrast-stretched original; kept cells
+                        outlined in red, locality-filtered ones in blue
+  masks/<stem>.tif      raw uint16/uint32 label image of the KEPT cells
 
 Only files matching --pattern (default *_SNAP.tif, case-insensitive) are processed.
 
@@ -25,15 +38,18 @@ Quick start
 -----------
     # CUDA torch first (WSL2 + RTX 3080 Ti), then the rest:
     pip install torch --index-url https://download.pytorch.org/whl/cu124
-    pip install cellpose tifffile scikit-image pillow numpy
+    pip install cellpose tifffile scikit-image pillow numpy scipy
 
-    python count_cells.py --input photos --out results
-    python count_cells.py --input photos --limit 5 --cellprob-threshold -2   # faint images
+    python count_cells.py --input photos --out results --locality
+    python count_cells.py --input photos --limit 5 --cellprob-threshold -2 --locality
 
 Tuning knobs that matter for low-signal images like these:
   --cellprob-threshold  lower it (e.g. -1, -2, -3) to recover faint nuclei
-  --flow-threshold      raise it (e.g. 0.6) to keep more candidate masks
-  --diameter            usually leave at 0 (auto); set it if scale is known
+  --flow-threshold      raise it (e.g. 0.6) to keep more masks
+  --locality            enable the isolated-detection filter (recommended here)
+  --locality-min-cluster smallest group size to keep; raise to kill more noise
+  --locality-factor     scales the adaptive grouping radius (factor x median NN)
+  --locality-radius     fixed px grouping radius instead of adaptive; 0 = adaptive
   --min-size            raise to drop speckle, lower to keep tiny nuclei
 """
 
@@ -55,6 +71,9 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import numpy as np
 import tifffile
 from PIL import Image, ImageDraw
+from scipy.spatial import cKDTree
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 from skimage.exposure import rescale_intensity
 from skimage.measure import regionprops
 from skimage.morphology import dilation, disk
@@ -102,6 +121,59 @@ def load_grayscale(path: Path, channel: int | None) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------- #
+# Locality filter: drop spatially isolated detections
+# --------------------------------------------------------------------------- #
+def filter_isolated(masks: np.ndarray, radius: float, factor: float, min_cluster: int):
+    """Split `masks` into (kept, removed) label images by neighbourhood grouping.
+
+    Detections are joined by an edge when their centroids are within `radius`, and
+    only detections belonging to a connected group of at least `min_cluster`
+    members are kept. Real tissue forms one huge group; scattered background
+    detections form tiny islands (size 1-few) and are removed. This is far more
+    decisive than a global-median distance test, which lets small noise clumps
+    survive.
+
+    `radius` is used if given (>0); otherwise it is `factor * median(nearest-
+    neighbour distance)`, which self-scales to the image's cell spacing.
+
+    Returns (kept_masks, removed_masks, info).
+    """
+    props = regionprops(masks)
+    n = len(props)
+    if n < min_cluster:
+        # Fewer detections than a single valid group needs; can't judge — leave as-is.
+        return masks, np.zeros_like(masks), {"n_removed": 0, "radius": float("nan"),
+                                             "median_nn": float("nan"), "skipped": True}
+
+    labels = np.array([p.label for p in props])
+    centroids = np.array([p.centroid for p in props])  # (N, 2) as (y, x)
+
+    tree = cKDTree(centroids)
+    nn = tree.query(centroids, k=2)[0][:, 1]  # distance to nearest other detection
+    r = radius if radius and radius > 0 else factor * float(np.median(nn))
+
+    pairs = tree.query_pairs(r, output_type="ndarray")
+    if len(pairs):
+        graph = csr_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
+        _, comp = connected_components(graph, directed=False)
+    else:
+        comp = np.arange(n)  # no edges: every detection is its own group of 1
+
+    sizes = np.bincount(comp)
+    keep = sizes[comp] >= min_cluster
+    removed_labels = labels[~keep]
+    removed_mask = np.isin(masks, removed_labels)
+
+    kept = masks.copy()
+    kept[removed_mask] = 0
+    removed = masks.copy()
+    removed[~removed_mask] = 0
+
+    return kept, removed, {"n_removed": int(removed_labels.size), "radius": r,
+                           "median_nn": float(np.median(nn)), "skipped": False}
+
+
+# --------------------------------------------------------------------------- #
 # Verification overlay
 # --------------------------------------------------------------------------- #
 def to_display_rgb(gray: np.ndarray, low: float = 1.0, high: float = 99.8) -> np.ndarray:
@@ -114,25 +186,33 @@ def to_display_rgb(gray: np.ndarray, low: float = 1.0, high: float = 99.8) -> np
     return np.dstack([stretched] * 3)
 
 
-def build_overlay(gray: np.ndarray, masks: np.ndarray, n_cells: int,
-                  outline=(255, 60, 60), thickness: int = 1,
-                  dots: bool = False) -> Image.Image:
-    """Original (stretched) with each cell outlined; count burned into a corner."""
+def _draw_boundaries(rgb, masks, color, thickness):
+    if masks is None or not masks.any():
+        return
+    b = find_boundaries(masks, mode="outer")
+    if thickness > 1:
+        b = dilation(b, disk(thickness - 1))
+    rgb[b] = color
+
+
+def build_overlay(gray: np.ndarray, kept_masks: np.ndarray, removed_masks: np.ndarray | None,
+                  n_kept: int, n_filtered: int,
+                  keep_color=(255, 60, 60), drop_color=(0, 170, 255),
+                  thickness: int = 1, dots: bool = False) -> Image.Image:
+    """Stretched original with kept cells outlined red, filtered ones blue."""
     rgb = to_display_rgb(gray)
 
-    boundaries = find_boundaries(masks, mode="outer")
-    if thickness > 1:
-        boundaries = dilation(boundaries, disk(thickness - 1))
-    rgb[boundaries] = outline
+    _draw_boundaries(rgb, removed_masks, drop_color, thickness)  # under kept
+    _draw_boundaries(rgb, kept_masks, keep_color, thickness)
 
     if dots:
-        for prop in regionprops(masks):
+        for prop in regionprops(kept_masks):
             y, x = (int(round(v)) for v in prop.centroid)
-            rgb[max(0, y - 1):y + 2, max(0, x - 1):x + 2] = (80, 200, 255)
+            rgb[max(0, y - 1):y + 2, max(0, x - 1):x + 2] = (80, 255, 120)
 
     im = Image.fromarray(rgb, mode="RGB")
     draw = ImageDraw.Draw(im)
-    label = f"{n_cells} cells"
+    label = f"{n_kept} cells" + (f"   {n_filtered} filtered" if n_filtered else "")
     draw.rectangle([4, 4, 12 + 7 * len(label), 22], fill=(0, 0, 0))
     draw.text((8, 7), label, fill=(255, 255, 0))
     return im
@@ -158,11 +238,25 @@ def count_image(model, path: Path, args, dirs) -> dict:
     if args.exclude_border:
         masks = clear_border(masks)
 
+    removed_masks = None
+    n_filtered = 0
+    if args.locality:
+        masks, removed_masks, linfo = filter_isolated(
+            masks, radius=args.locality_radius, factor=args.locality_factor,
+            min_cluster=args.locality_min_cluster)
+        n_filtered = linfo["n_removed"]
+        if linfo["skipped"]:
+            log.info("%s: fewer detections than min-cluster; locality filter skipped", path.name)
+        else:
+            log.info("%s: locality removed %d isolated (radius %.1f px, median NN %.1f px)",
+                     path.name, n_filtered, linfo["radius"], linfo["median_nn"])
+
     labels = np.unique(masks)
     n_cells = int((labels != 0).sum())
 
     stem = path.stem
-    overlay = build_overlay(gray, masks, n_cells, thickness=args.outline_thickness, dots=args.dots)
+    overlay = build_overlay(gray, masks, removed_masks, n_cells, n_filtered,
+                            thickness=args.outline_thickness, dots=args.dots)
     overlay_path = dirs["overlays"] / f"{stem}.png"
     overlay.save(overlay_path)
 
@@ -174,6 +268,7 @@ def count_image(model, path: Path, args, dirs) -> dict:
     return {
         "filename": path.name,
         "n_cells": n_cells,
+        "n_filtered": n_filtered,
         "height": gray.shape[0],
         "width": gray.shape[1],
         "overlay": overlay_path,
@@ -186,22 +281,26 @@ def count_image(model, path: Path, args, dirs) -> dict:
 def write_csv(rows: list[dict], args, out: Path) -> None:
     with out.open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["filename", "n_cells", "height", "width",
-                    "cellprob_threshold", "flow_threshold", "diameter", "min_size"])
+        w.writerow(["filename", "n_cells", "n_filtered", "height", "width",
+                    "cellprob_threshold", "flow_threshold", "diameter", "min_size",
+                    "locality", "locality_min_cluster", "locality_factor", "locality_radius"])
         for r in rows:
-            w.writerow([r["filename"], r["n_cells"], r["height"], r["width"],
-                        args.cellprob_threshold, args.flow_threshold,
-                        args.diameter, args.min_size])
+            w.writerow([r["filename"], r["n_cells"], r["n_filtered"], r["height"], r["width"],
+                        args.cellprob_threshold, args.flow_threshold, args.diameter, args.min_size,
+                        args.locality, args.locality_min_cluster, args.locality_factor,
+                        args.locality_radius])
 
 
 def write_html(rows: list[dict], out: Path) -> None:
     total = sum(r["n_cells"] for r in rows)
+    total_filt = sum(r["n_filtered"] for r in rows)
     cards = []
     for r in rows:
         rel = Path("overlays") / Path(r["overlay"]).name
+        filt = f' &middot; <span>{r["n_filtered"]} filtered</span>' if r["n_filtered"] else ""
         cards.append(
             f'<figure><img src="{html.escape(str(rel))}" loading="lazy">'
-            f'<figcaption><b>{r["n_cells"]}</b> cells<br>'
+            f'<figcaption><b>{r["n_cells"]}</b> cells{filt}<br>'
             f'<span>{html.escape(r["filename"])}</span></figcaption></figure>'
         )
     out.write_text(f"""<!doctype html><meta charset="utf-8">
@@ -216,7 +315,7 @@ def write_html(rows: list[dict], out: Path) -> None:
  b{{color:#ffd23f}}
 </style>
 <h1>Cell count report</h1>
-<div class="meta">{len(rows)} images &middot; {total} cells total</div>
+<div class="meta">{len(rows)} images &middot; {total} cells total &middot; {total_filt} filtered as isolated</div>
 <div class="grid">{''.join(cards)}</div>
 """, encoding="utf-8")
 
@@ -242,6 +341,15 @@ def main(argv=None) -> int:
     ap.add_argument("--batch-size", type=int, default=8, help="tiles per GPU batch; raise (16/32) to use more VRAM")
     ap.add_argument("--no-resample", action="store_true", help="skip flow resampling: faster, blockier masks")
     ap.add_argument("--exclude-border", action="store_true", help="don't count cells touching the edge")
+    # locality filter
+    ap.add_argument("--locality", action="store_true", help="drop spatially isolated detections")
+    ap.add_argument("--locality-min-cluster", type=int, default=10,
+                    help="min detections in a neighbourhood group to keep it (kills background specks)")
+    ap.add_argument("--locality-factor", type=float, default=2.0,
+                    help="adaptive radius = factor * median nearest-neighbour distance")
+    ap.add_argument("--locality-radius", type=float, default=0.0,
+                    help="fixed px grouping radius instead of adaptive; 0 = adaptive")
+    # overlay / run control
     ap.add_argument("--outline-thickness", type=int, default=1, help="overlay outline thickness")
     ap.add_argument("--dots", action="store_true", help="also mark centroids on the overlay")
     ap.add_argument("--limit", type=int, default=0, help="process at most N images (0=all)")
@@ -301,8 +409,9 @@ def main(argv=None) -> int:
 
     write_csv(rows, args, args.out / "report.csv")
     write_html(rows, args.out / "report.html")
-    log.info("Done. %d images, %d cells total. Report: %s",
-             len(rows), sum(r["n_cells"] for r in rows), args.out / "report.html")
+    log.info("Done. %d images, %d cells total, %d filtered. Report: %s",
+             len(rows), sum(r["n_cells"] for r in rows),
+             sum(r["n_filtered"] for r in rows), args.out / "report.html")
     return 0
 
 
