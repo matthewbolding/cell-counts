@@ -9,6 +9,7 @@
 # Then, on either platform:
 #   pip install -r requirements.txt
 cellpose>=4.0
+scipy
 tifffile
 scikit-image
 pillow

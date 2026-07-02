@@ -6,3 +6,5 @@ results/
 
 *.html
 *.csv
+
+.DS_Store
