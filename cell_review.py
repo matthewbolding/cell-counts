@@ -231,8 +231,8 @@ class ReviewApp(tk.Tk):
 
         instructions = (
             "Click a shape to switch it between a cell (red) and not a cell "
-            "(blue). Click it again to switch it back. Every click saves "
-            "automatically — there's nothing else to do.\n\n"
+            "(blue). Click it again to switch it back. All changes save "
+            "as they are made.\n\n"
             "Drag a rectangle to select several detections at once and mark "
             "them all as cells or not cells.\n\n"
             "Hold the right mouse button to hide the outlines and see the "
