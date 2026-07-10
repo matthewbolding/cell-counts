@@ -1,5 +1,6 @@
 photos/
 results/
+__pycache__/
 
 *.tif
 *.png

@@ -1,0 +1,8 @@
+# Requirements for cell_review.py — the reviewer's GUI, run on a plain
+# Windows machine with no GPU and no virtual environment.
+#
+#   pip install --user -r requirements-review.txt
+#
+# (tkinter is not listed here: it ships with the standard python.org
+# Windows/macOS installer, no separate install needed.)
+pillow

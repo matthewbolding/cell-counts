@@ -31,6 +31,12 @@ Outputs (under --out, default ./results):
   overlays/<stem>.png   sister image: contrast-stretched original; kept cells
                         outlined in red, locality-filtered ones in blue
   masks/<stem>.tif      raw uint16/uint32 label image of the KEPT cells
+  review/<stem>.json    every detection (kept + filtered) as a vector polygon
+                        with a status, for the standalone review GUI
+                        (see cell_review.py) to render and let a human edit
+  review/backgrounds/<stem>.png
+                        plain contrast-stretched image, no overlay baked in —
+                        the review GUI draws polygons on top of this itself
 
 Only files matching --pattern (default *_SNAP.tif, case-insensitive) are processed.
 
@@ -46,6 +52,8 @@ Quick start
 Tuning knobs that matter for low-signal images like these:
   --cellprob-threshold  lower it (e.g. -1, -2, -3) to recover faint nuclei
   --flow-threshold      raise it (e.g. 0.6) to keep more masks
+  --brightness          drop detections with no real signal inside them
+  --brightness-factor   threshold = background + factor x noise; lower = fainter OK
   --locality            enable the isolated-detection filter (recommended here)
   --locality-min-cluster smallest group size to keep; raise to kill more noise
   --locality-factor     scales the adaptive grouping radius (factor x median NN)
@@ -58,6 +66,7 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import json
 import logging
 import os
 import sys
@@ -75,7 +84,7 @@ from scipy.spatial import cKDTree
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from skimage.exposure import rescale_intensity
-from skimage.measure import regionprops
+from skimage.measure import find_contours, regionprops
 from skimage.morphology import dilation, disk
 from skimage.segmentation import clear_border, find_boundaries
 
@@ -174,6 +183,48 @@ def filter_isolated(masks: np.ndarray, radius: float, factor: float, min_cluster
 
 
 # --------------------------------------------------------------------------- #
+# Brightness filter: drop detections with no real signal inside them
+# --------------------------------------------------------------------------- #
+def filter_dim(masks: np.ndarray, gray: np.ndarray, min_brightness: float, factor: float):
+    """Split `masks` into (kept, removed) by interior brightness on the RAW image.
+
+    The model sometimes rings a dark patch that contains no signal. Background is
+    estimated from all non-cell pixels (robust median + MAD), and any detection
+    whose mean interior intensity fails to clear `background + factor * noise` is
+    removed. `min_brightness` (>0) overrides the adaptive threshold with an
+    absolute one in raw-image units.
+
+    Returns (kept_masks, removed_masks, info).
+    """
+    props = regionprops(masks, intensity_image=gray.astype(np.float32))
+    if not props:
+        return masks, np.zeros_like(masks), {"n_removed": 0, "threshold": float("nan"),
+                                             "background": float("nan"), "skipped": True}
+
+    bg_pixels = gray[masks == 0]
+    if bg_pixels.size:
+        bg = float(np.median(bg_pixels))
+        noise = float(np.median(np.abs(bg_pixels - bg))) * 1.4826  # robust std via MAD
+    else:
+        bg, noise = 0.0, 1.0
+
+    thr = min_brightness if min_brightness and min_brightness > 0 else bg + factor * max(noise, 1e-6)
+
+    labels = np.array([p.label for p in props])
+    means = np.array([p.intensity_mean for p in props])
+    removed_labels = labels[means < thr]
+    removed_mask = np.isin(masks, removed_labels)
+
+    kept = masks.copy()
+    kept[removed_mask] = 0
+    removed = masks.copy()
+    removed[~removed_mask] = 0
+
+    return kept, removed, {"n_removed": int(removed_labels.size), "threshold": thr,
+                           "background": bg, "skipped": False}
+
+
+# --------------------------------------------------------------------------- #
 # Verification overlay
 # --------------------------------------------------------------------------- #
 def to_display_rgb(gray: np.ndarray, low: float = 1.0, high: float = 99.8) -> np.ndarray:
@@ -195,15 +246,17 @@ def _draw_boundaries(rgb, masks, color, thickness):
     rgb[b] = color
 
 
-def build_overlay(gray: np.ndarray, kept_masks: np.ndarray, removed_masks: np.ndarray | None,
-                  n_kept: int, n_filtered: int,
-                  keep_color=(255, 60, 60), drop_color=(0, 170, 255),
+def build_overlay(gray: np.ndarray, kept_masks: np.ndarray,
+                  iso_masks: np.ndarray | None, dim_masks: np.ndarray | None,
+                  n_kept: int, n_iso: int, n_dim: int,
+                  keep_color=(255, 60, 60), iso_color=(0, 170, 255), dim_color=(255, 170, 0),
                   thickness: int = 1, dots: bool = False) -> Image.Image:
-    """Stretched original with kept cells outlined red, filtered ones blue."""
+    """Stretched original: kept cells red, isolated-filtered blue, dim-filtered amber."""
     rgb = to_display_rgb(gray)
 
-    _draw_boundaries(rgb, removed_masks, drop_color, thickness)  # under kept
-    _draw_boundaries(rgb, kept_masks, keep_color, thickness)
+    _draw_boundaries(rgb, dim_masks, dim_color, thickness)   # rejects underneath
+    _draw_boundaries(rgb, iso_masks, iso_color, thickness)
+    _draw_boundaries(rgb, kept_masks, keep_color, thickness)  # kept on top
 
     if dots:
         for prop in regionprops(kept_masks):
@@ -212,10 +265,96 @@ def build_overlay(gray: np.ndarray, kept_masks: np.ndarray, removed_masks: np.nd
 
     im = Image.fromarray(rgb, mode="RGB")
     draw = ImageDraw.Draw(im)
-    label = f"{n_kept} cells" + (f"   {n_filtered} filtered" if n_filtered else "")
+    extra = []
+    if n_dim:
+        extra.append(f"{n_dim} dim")
+    if n_iso:
+        extra.append(f"{n_iso} isolated")
+    label = f"{n_kept} cells" + (f"   {'  '.join(extra)}" if extra else "")
     draw.rectangle([4, 4, 12 + 7 * len(label), 22], fill=(0, 0, 0))
     draw.text((8, 7), label, fill=(255, 255, 0))
     return im
+
+
+# --------------------------------------------------------------------------- #
+# Review data: vector polygons for the standalone review GUI
+# --------------------------------------------------------------------------- #
+def _polygons_for_region(prop) -> list[list[list[float]]]:
+    """Boundary ring(s) of one regionprops region, each as a list of [x, y] points.
+
+    `prop.image` is a tight local binary crop of just this one label. Padding it
+    by one pixel of False first guarantees find_contours closes every loop even
+    when the region touches its own bounding box (which it always does). Cellpose
+    occasionally assigns one label to a couple of disconnected pixel clusters, in
+    which case find_contours returns more than one closed loop; every loop is
+    kept (not just the longest) so the polygon never silently omits part of the
+    labelled region.
+    """
+    minr, minc, _maxr, _maxc = prop.bbox
+    local = np.pad(prop.image, 1, mode="constant", constant_values=False)
+    contours = find_contours(local.astype(np.uint8), level=0.5)
+    rings = []
+    for contour in contours:
+        rows = contour[:, 0] - 1 + minr
+        cols = contour[:, 1] - 1 + minc
+        rings.append([[round(float(c), 2), round(float(r), 2)] for r, c in zip(rows, cols)])
+    return rings
+
+
+def _build_review_cells(kept_masks: np.ndarray, dim_masks: np.ndarray | None,
+                        iso_masks: np.ndarray | None) -> list[dict]:
+    """Flatten kept + filtered label images into one list of polygon records.
+
+    Label ids are unique across the three arrays (they all partition the same
+    original detection set), so no id collisions are possible between them.
+    """
+    cells = []
+    groups = [("kept", None, kept_masks)]
+    if dim_masks is not None:
+        groups.append(("filtered", "dim", dim_masks))
+    if iso_masks is not None:
+        groups.append(("filtered", "isolated", iso_masks))
+
+    for status, reason, masks in groups:
+        if masks is None or not masks.any():
+            continue
+        for prop in regionprops(masks):
+            polygons = _polygons_for_region(prop)
+            if not polygons:
+                continue
+            y, x = prop.centroid
+            cells.append({
+                "id": int(prop.label),
+                "original_status": status,
+                "status": status,
+                "filter_reason": reason,
+                "centroid": [round(float(x), 2), round(float(y), 2)],
+                "area": int(prop.area),
+                "polygons": polygons,
+            })
+    return cells
+
+
+def write_review_data(path: Path, gray: np.ndarray, kept_masks: np.ndarray,
+                      dim_masks: np.ndarray | None, iso_masks: np.ndarray | None,
+                      dirs: dict) -> Path:
+    """Write the plain (unannotated) background PNG and the per-cell polygon JSON
+    that cell_review.py reads and edits."""
+    stem = path.stem
+    bg_path = dirs["review_backgrounds"] / f"{stem}.png"
+    Image.fromarray(to_display_rgb(gray), mode="RGB").save(bg_path)
+
+    data = {
+        "schema_version": 2,
+        "image": path.name,
+        "width": int(gray.shape[1]),
+        "height": int(gray.shape[0]),
+        "background": f"backgrounds/{bg_path.name}",
+        "cells": _build_review_cells(kept_masks, dim_masks, iso_masks),
+    }
+    review_path = dirs["review"] / f"{stem}.json"
+    review_path.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
+    return review_path
 
 
 # --------------------------------------------------------------------------- #
@@ -238,24 +377,35 @@ def count_image(model, path: Path, args, dirs) -> dict:
     if args.exclude_border:
         masks = clear_border(masks)
 
-    removed_masks = None
-    n_filtered = 0
+    # Brightness filter first: strip rings drawn over empty background, so the
+    # locality step then judges grouping on real detections only.
+    dim_masks = None
+    n_dim = 0
+    if args.brightness:
+        masks, dim_masks, binfo = filter_dim(
+            masks, gray, min_brightness=args.min_brightness, factor=args.brightness_factor)
+        n_dim = binfo["n_removed"]
+        log.info("%s: brightness removed %d dim (threshold %.1f, background %.1f)",
+                 path.name, n_dim, binfo["threshold"], binfo["background"])
+
+    iso_masks = None
+    n_iso = 0
     if args.locality:
-        masks, removed_masks, linfo = filter_isolated(
+        masks, iso_masks, linfo = filter_isolated(
             masks, radius=args.locality_radius, factor=args.locality_factor,
             min_cluster=args.locality_min_cluster)
-        n_filtered = linfo["n_removed"]
+        n_iso = linfo["n_removed"]
         if linfo["skipped"]:
             log.info("%s: fewer detections than min-cluster; locality filter skipped", path.name)
         else:
             log.info("%s: locality removed %d isolated (radius %.1f px, median NN %.1f px)",
-                     path.name, n_filtered, linfo["radius"], linfo["median_nn"])
+                     path.name, n_iso, linfo["radius"], linfo["median_nn"])
 
     labels = np.unique(masks)
     n_cells = int((labels != 0).sum())
 
     stem = path.stem
-    overlay = build_overlay(gray, masks, removed_masks, n_cells, n_filtered,
+    overlay = build_overlay(gray, masks, iso_masks, dim_masks, n_cells, n_iso, n_dim,
                             thickness=args.outline_thickness, dots=args.dots)
     overlay_path = dirs["overlays"] / f"{stem}.png"
     overlay.save(overlay_path)
@@ -264,11 +414,15 @@ def count_image(model, path: Path, args, dirs) -> dict:
     mask_path = dirs["masks"] / f"{stem}.tif"
     tifffile.imwrite(str(mask_path), masks.astype(dtype))
 
+    write_review_data(path, gray, masks, dim_masks, iso_masks, dirs)
+
     log.info("%-40s -> %5d cells  (shape %s)", path.name, n_cells, gray.shape)
     return {
         "filename": path.name,
         "n_cells": n_cells,
-        "n_filtered": n_filtered,
+        "n_dim": n_dim,
+        "n_isolated": n_iso,
+        "n_filtered": n_dim + n_iso,
         "height": gray.shape[0],
         "width": gray.shape[1],
         "overlay": overlay_path,
@@ -281,23 +435,32 @@ def count_image(model, path: Path, args, dirs) -> dict:
 def write_csv(rows: list[dict], args, out: Path) -> None:
     with out.open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["filename", "n_cells", "n_filtered", "height", "width",
+        w.writerow(["filename", "n_cells", "n_dim", "n_isolated", "height", "width",
                     "cellprob_threshold", "flow_threshold", "diameter", "min_size",
+                    "brightness", "brightness_factor", "min_brightness",
                     "locality", "locality_min_cluster", "locality_factor", "locality_radius"])
         for r in rows:
-            w.writerow([r["filename"], r["n_cells"], r["n_filtered"], r["height"], r["width"],
+            w.writerow([r["filename"], r["n_cells"], r["n_dim"], r["n_isolated"],
+                        r["height"], r["width"],
                         args.cellprob_threshold, args.flow_threshold, args.diameter, args.min_size,
+                        args.brightness, args.brightness_factor, args.min_brightness,
                         args.locality, args.locality_min_cluster, args.locality_factor,
                         args.locality_radius])
 
 
 def write_html(rows: list[dict], out: Path) -> None:
     total = sum(r["n_cells"] for r in rows)
-    total_filt = sum(r["n_filtered"] for r in rows)
+    total_dim = sum(r["n_dim"] for r in rows)
+    total_iso = sum(r["n_isolated"] for r in rows)
     cards = []
     for r in rows:
         rel = Path("overlays") / Path(r["overlay"]).name
-        filt = f' &middot; <span>{r["n_filtered"]} filtered</span>' if r["n_filtered"] else ""
+        bits = []
+        if r["n_dim"]:
+            bits.append(f'{r["n_dim"]} dim')
+        if r["n_isolated"]:
+            bits.append(f'{r["n_isolated"]} isolated')
+        filt = f' &middot; <span>{", ".join(bits)}</span>' if bits else ""
         cards.append(
             f'<figure><img src="{html.escape(str(rel))}" loading="lazy">'
             f'<figcaption><b>{r["n_cells"]}</b> cells{filt}<br>'
@@ -315,7 +478,8 @@ def write_html(rows: list[dict], out: Path) -> None:
  b{{color:#ffd23f}}
 </style>
 <h1>Cell count report</h1>
-<div class="meta">{len(rows)} images &middot; {total} cells total &middot; {total_filt} filtered as isolated</div>
+<div class="meta">{len(rows)} images &middot; {total} cells total &middot; \
+{total_dim} dim + {total_iso} isolated filtered</div>
 <div class="grid">{''.join(cards)}</div>
 """, encoding="utf-8")
 
@@ -341,6 +505,13 @@ def main(argv=None) -> int:
     ap.add_argument("--batch-size", type=int, default=8, help="tiles per GPU batch; raise (16/32) to use more VRAM")
     ap.add_argument("--no-resample", action="store_true", help="skip flow resampling: faster, blockier masks")
     ap.add_argument("--exclude-border", action="store_true", help="don't count cells touching the edge")
+    # brightness filter
+    ap.add_argument("--brightness", action="store_true",
+                    help="drop detections whose interior has no signal above background")
+    ap.add_argument("--brightness-factor", type=float, default=3.0,
+                    help="threshold = background + factor * robust-noise; lower keeps fainter cells")
+    ap.add_argument("--min-brightness", type=float, default=0.0,
+                    help="absolute interior-intensity threshold in raw units; 0 = adaptive")
     # locality filter
     ap.add_argument("--locality", action="store_true", help="drop spatially isolated detections")
     ap.add_argument("--locality-min-cluster", type=int, default=10,
@@ -392,7 +563,12 @@ def main(argv=None) -> int:
         model_kwargs["use_bfloat16"] = False  # bf16 can misbehave on some MPS builds
     model = models.CellposeModel(**model_kwargs)
 
-    dirs = {"overlays": args.out / "overlays", "masks": args.out / "masks"}
+    dirs = {
+        "overlays": args.out / "overlays",
+        "masks": args.out / "masks",
+        "review": args.out / "review",
+        "review_backgrounds": args.out / "review" / "backgrounds",
+    }
     for d in (args.out, *dirs.values()):
         d.mkdir(parents=True, exist_ok=True)
 
