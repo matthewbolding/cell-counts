@@ -35,11 +35,16 @@ Running it
 
 Controls
 --------
-    Click a shape          toggle it between cell (red) and not-a-cell (blue)
+    Click a shape           toggle it between cell (red) and not-a-cell (blue)
+    Left-drag a rectangle   select every detection whose centre falls inside,
+                             then choose to mark them all as cells or not cells
+    Hold right mouse button hide all outlines while held, to see the plain image
     Prev / Next buttons, or Left / Right arrow keys   change image
-    Mouse wheel            scroll
-    Ctrl + mouse wheel     zoom (or the -, Fit, + buttons)
-    Image list (right)     jump straight to an image
+    Mouse wheel             scroll
+    Ctrl + mouse wheel      zoom (or the -, Fit, + buttons)
+    Fit button              portrait images fit to the window's width,
+                             landscape images fit to the window's height
+    Image list (right)      jump straight to an image
 """
 
 from __future__ import annotations
@@ -74,6 +79,7 @@ KEPT_COLOR = "#ff3b3b"      # red: model believes this is a cell
 FILTERED_COLOR = "#33aaff"  # blue: a filter voided this detection
 MIN_SCALE, MAX_SCALE = 0.02, 8.0
 ZOOM_STEP = 1.25
+DRAG_THRESHOLD = 4  # canvas px of movement before a left-button press becomes a drag-select
 
 
 def _point_in_polygon(x: float, y: float, poly: list[list[float]]) -> bool:
@@ -124,6 +130,9 @@ class ReviewApp(tk.Tk):
         self.photo = None  # keep a reference so Tk doesn't garbage-collect it
         self.img_w = self.img_h = 1
         self._suppress_listbox_event = False
+        self._drag_start = None    # canvas coords where the left button went down
+        self._drag_rect_id = None  # id of the in-progress selection rectangle
+        self._dragging = False     # True once the drag has moved past the click threshold
 
         self._build_menu()
         self._build_ui()
@@ -165,7 +174,11 @@ class ReviewApp(tk.Tk):
         vbar.grid(row=0, column=1, sticky="ns")
         hbar.grid(row=1, column=0, sticky="ew")
 
-        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<ButtonPress-1>", self._on_left_press)
+        self.canvas.bind("<B1-Motion>", self._on_left_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_left_release)
+        self.canvas.bind("<ButtonPress-3>", self._hide_outlines)
+        self.canvas.bind("<ButtonRelease-3>", self._show_outlines)
         self.canvas.bind("<MouseWheel>", self._on_wheel)                 # Windows/Mac
         self.canvas.bind("<Shift-MouseWheel>", self._on_shift_wheel)
         self.canvas.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
@@ -219,7 +232,11 @@ class ReviewApp(tk.Tk):
         instructions = (
             "Click a shape to switch it between a cell (red) and not a cell "
             "(blue). Click it again to switch it back. Every click saves "
-            "automatically — there's nothing else to do."
+            "automatically — there's nothing else to do.\n\n"
+            "Drag a rectangle to select several detections at once and mark "
+            "them all as cells or not cells.\n\n"
+            "Hold the right mouse button to hide the outlines and see the "
+            "plain image."
         )
         ttk.Label(right, text=instructions, wraplength=260, foreground="#666").pack(
             anchor="w", padx=12, pady=(12, 0))
@@ -331,14 +348,21 @@ class ReviewApp(tk.Tk):
                     pts.append(x * self.scale)
                     pts.append(y * self.scale)
                 items.append(self.canvas.create_polygon(
-                    *pts, outline=color, fill="", width=line_w + (1 if edited else 0)))
+                    *pts, outline=color, fill="", width=line_w + (1 if edited else 0),
+                    tags="outline"))
             cell["_items"] = items
 
     def _fit(self) -> None:
+        """Fit the image to the window: span its width if portrait, its height if
+        landscape (square counts as portrait), scrolling to see the rest."""
         self.update_idletasks()
         vw = max(self.canvas.winfo_width(), 100)
         vh = max(self.canvas.winfo_height(), 100)
-        self.scale = max(min(vw / self.img_w, vh / self.img_h, MAX_SCALE), MIN_SCALE)
+        if self.img_h >= self.img_w:
+            scale = vw / self.img_w
+        else:
+            scale = vh / self.img_h
+        self.scale = max(min(scale, MAX_SCALE), MIN_SCALE)
         self._render()
 
     # ------------------------------------------------------------------ #
@@ -379,17 +403,80 @@ class ReviewApp(tk.Tk):
         self._zoom(factor, anchor=(event.x, event.y))
 
     # ------------------------------------------------------------------ #
-    # Clicking / toggling cells
+    # Clicking / toggling cells / rectangle drag-select / hiding outlines
     # ------------------------------------------------------------------ #
-    def _on_click(self, event) -> None:
+    def _on_left_press(self, event) -> None:
         if self.current is None:
             return
-        cx = self.canvas.canvasx(event.x)
-        cy = self.canvas.canvasy(event.y)
-        ix, iy = cx / self.scale, cy / self.scale
-        cell = self._hit_test(ix, iy)
-        if cell is not None:
-            self._toggle(cell)
+        self._drag_start = (self.canvas.canvasx(event.x), self.canvas.canvasy(event.y))
+        self._drag_rect_id = None
+        self._dragging = False
+
+    def _on_left_drag(self, event) -> None:
+        if self.current is None or self._drag_start is None:
+            return
+        cx, cy = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        sx, sy = self._drag_start
+        if not self._dragging:
+            if abs(cx - sx) < DRAG_THRESHOLD and abs(cy - sy) < DRAG_THRESHOLD:
+                return
+            self._dragging = True
+        if self._drag_rect_id is None:
+            self._drag_rect_id = self.canvas.create_rectangle(
+                sx, sy, cx, cy, outline="#ffffff", dash=(4, 2), width=2)
+        else:
+            self.canvas.coords(self._drag_rect_id, sx, sy, cx, cy)
+
+    def _on_left_release(self, event) -> None:
+        if self.current is None or self._drag_start is None:
+            return
+        cx, cy = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        sx, sy = self._drag_start
+        was_dragging = self._dragging
+
+        if self._drag_rect_id is not None:
+            self.canvas.delete(self._drag_rect_id)
+        self._drag_rect_id = None
+        self._drag_start = None
+        self._dragging = False
+
+        if was_dragging:
+            self._select_rectangle(sx, sy, cx, cy)
+        else:
+            ix, iy = cx / self.scale, cy / self.scale
+            cell = self._hit_test(ix, iy)
+            if cell is not None:
+                self._toggle(cell)
+
+    def _select_rectangle(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        """Prompt to bulk-mark every detection whose centroid falls in the
+        image-space rectangle spanned by the two (canvas-space) corners."""
+        left, right = sorted((x0 / self.scale, x1 / self.scale))
+        top, bottom = sorted((y0 / self.scale, y1 / self.scale))
+        selected = [
+            cell for cell in self.current["cells"]
+            if left <= cell["centroid"][0] <= right and top <= cell["centroid"][1] <= bottom
+        ]
+        if not selected:
+            return
+        mark_as_cells = messagebox.askyesnocancel(
+            "Mark detections",
+            f"{len(selected)} detection(s) selected.\n\n"
+            "Mark all as cells (Yes) or not cells (No)? Cancel to leave them unchanged.")
+        if mark_as_cells is None:
+            return
+        new_status = "kept" if mark_as_cells else "filtered"
+        for cell in selected:
+            cell["status"] = new_status
+        self._save_current()
+        self._render()
+        self._update_counts()
+
+    def _hide_outlines(self, event=None) -> None:
+        self.canvas.itemconfigure("outline", state="hidden")
+
+    def _show_outlines(self, event=None) -> None:
+        self.canvas.itemconfigure("outline", state="normal")
 
     def _hit_test(self, x: float, y: float) -> dict | None:
         candidates = []
