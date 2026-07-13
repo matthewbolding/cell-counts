@@ -1,0 +1,11 @@
+# torch is pulled in transitively by cellpose; pip resolves it to a build matching
+# whatever's newest on PyPI, which in turn talks to the GPU via nvidia-container-
+# toolkit on the host — no CUDA-version-specific index URL needed here.
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2
+cellpose>=4.0
+scipy
+tifffile
+scikit-image
+numpy

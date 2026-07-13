@@ -1,0 +1,6 @@
+# Cell Counts client — install with:
+#   pip install --user -r requirements.txt
+#
+# (tkinter ships with the standard python.org Windows/macOS installer, no separate
+# install needed.)
+requests

@@ -1,0 +1,18 @@
+services:
+  cellcounts-server:
+    build: .
+    image: cellcounts-server:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
