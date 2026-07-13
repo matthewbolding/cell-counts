@@ -268,7 +268,7 @@ class CellCountsApp(tk.Tk):
             self.review_panel.destroy()
         self.manifest = manifest
         self.review_panel = ReviewPanel(self.content_frame, self.folder, manifest, self.statusbar,
-                                         recognized, queue)
+                                         recognized, queue, self.client)
         self.viewmenu.entryconfig("Show Review", state="normal")
         self.filemenu.entryconfig("Export Data...", state="normal")
         self._show_review()

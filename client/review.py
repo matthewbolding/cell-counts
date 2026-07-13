@@ -12,6 +12,8 @@ you've panned, since this panel already tracks pan itself.
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -25,7 +27,9 @@ import export
 import geometry
 import imaging
 import rendering
+import rescan
 import state
+from api_client import ApiClient
 from manifest import Manifest, ScannedFile
 from processing_queue import ProcessingQueue
 from statusbar import STATE_COLORS
@@ -67,6 +71,15 @@ SCROLLBAR_COLORS = dict(background="#a0a0a0", troughcolor="#e8e8e8", activebackg
 # channel color, so it doesn't collide with the existing "filtered = gray"
 # convention or either channel's own color.
 COEXPRESS_HIGHLIGHT_COLOR = "#ffffff"
+# Rescan review: a proposed-but-undecided cell is outlined in the same yellow as
+# an in-progress hand-drawn polygon (rendering.IN_PROGRESS_COLOR) — "not yet
+# committed" reads the same way in both places. An accepted one is filled solid
+# green so it's obvious at a glance which proposals will actually get merged.
+RESCAN_PROPOSED_COLOR = "#ffdd00"
+RESCAN_ACCEPTED_COLOR = "#00e676"
+MIN_RESCAN_SIZE = 10  # image px — below this a drag is treated as too small to bother with
+DEFAULT_RESCAN_DIAMETERS = "0, 15, 30"
+DEFAULT_RESCAN_CELLPROBS = "-2, 0, 2"
 
 
 # ---------------------------------------------------------------------- #
@@ -115,6 +128,22 @@ class _ModifyAction:
     def redo(self, cells: list[dict]) -> None:
         for cell, _before, after in self.changes:
             cell["status"], cell["edited"] = after
+
+
+class _AddManyAction:
+    """A rescan merge added several cells at once — undoes/redoes as one step,
+    the same "batch is one action" precedent _ModifyAction already set for
+    drag-select."""
+
+    def __init__(self, cells: list[dict]):
+        self.cells = cells
+
+    def undo(self, cells: list[dict]) -> None:
+        for cell in self.cells:
+            cells.remove(cell)
+
+    def redo(self, cells: list[dict]) -> None:
+        cells.extend(self.cells)
 
 
 class _ExportDialog(tk.Toplevel):
@@ -220,15 +249,96 @@ class _ExportDialog(tk.Toplevel):
         self.destroy()
 
 
+class _RescanConfigDialog(tk.Toplevel):
+    """Rescan mode, after a region is dragged: pick which diameter/cellprob_threshold
+    combinations to try. No server changes were needed for this — each combination
+    is just another independent upload+job against the small crop, using the
+    existing chunked-upload/job-poll API with different `params`."""
+
+    def __init__(self, parent, crop_w: float, crop_h: float):
+        super().__init__(parent)
+        self.title("Rescan Region")
+        self.resizable(False, False)
+        self.result: tuple[list[float], list[float]] | None = None
+
+        outer = ttk.Frame(self, padding=16)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(outer, text=f"Region: {crop_w:.0f} x {crop_h:.0f} px",
+                  font=("", 10, "bold")).pack(anchor="w", pady=(0, 10))
+
+        ttk.Label(outer, text="Diameter (px), comma-separated (0 = auto):").pack(anchor="w")
+        self.diameter_entry = ttk.Entry(outer, width=30)
+        self.diameter_entry.insert(0, DEFAULT_RESCAN_DIAMETERS)
+        self.diameter_entry.pack(anchor="w", pady=(2, 8), fill="x")
+
+        ttk.Label(outer, text="Cell probability threshold, comma-separated:").pack(anchor="w")
+        self.cellprob_entry = ttk.Entry(outer, width=30)
+        self.cellprob_entry.insert(0, DEFAULT_RESCAN_CELLPROBS)
+        self.cellprob_entry.pack(anchor="w", pady=(2, 8), fill="x")
+
+        self.count_var = tk.StringVar()
+        ttk.Label(outer, textvariable=self.count_var, foreground="#666").pack(anchor="w", pady=(0, 10))
+        self.diameter_entry.bind("<KeyRelease>", lambda e: self._update_count())
+        self.cellprob_entry.bind("<KeyRelease>", lambda e: self._update_count())
+        self._update_count()
+
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(6, 0))
+        ttk.Button(buttons, text="Cancel", command=self._on_cancel).pack(side="right")
+        ttk.Button(buttons, text="Start", command=self._on_submit, default="active").pack(
+            side="right", padx=(0, 6))
+
+        self.bind("<Escape>", lambda e: self._on_cancel())
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.transient(parent)
+        self.diameter_entry.focus_set()
+        self.update_idletasks()
+        self.grab_set()
+        self.wait_window(self)
+
+    @staticmethod
+    def _parse_values(text: str) -> list[float] | None:
+        try:
+            values = [float(v.strip()) for v in text.split(",") if v.strip()]
+        except ValueError:
+            return None
+        return values or None
+
+    def _update_count(self) -> None:
+        diameters = self._parse_values(self.diameter_entry.get())
+        cellprobs = self._parse_values(self.cellprob_entry.get())
+        if diameters is None or cellprobs is None:
+            self.count_var.set("Enter valid comma-separated numbers.")
+        else:
+            n = len(diameters) * len(cellprobs)
+            self.count_var.set(f"{n} combination{'s' if n != 1 else ''} will be tried.")
+
+    def _on_submit(self) -> None:
+        diameters = self._parse_values(self.diameter_entry.get())
+        cellprobs = self._parse_values(self.cellprob_entry.get())
+        if diameters is None or cellprobs is None:
+            messagebox.showinfo("Rescan Region", "Enter at least one valid number in each field.",
+                                 parent=self)
+            return
+        self.result = (diameters, cellprobs)
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
 class ReviewPanel(ttk.Frame):
     def __init__(self, parent, folder: Path, manifest: Manifest, statusbar,
-                 recognized: list[ScannedFile], queue: ProcessingQueue):
+                 recognized: list[ScannedFile], queue: ProcessingQueue, client: ApiClient):
         super().__init__(parent)
         self.folder = folder
         self.manifest = manifest
         self.statusbar = statusbar
         self.recognized = recognized
         self.queue = queue
+        self.client = client
 
         self.image_cache = imaging.DisplayImageCache()
         self.ui_state = state.get_folder_state(folder)
@@ -257,7 +367,18 @@ class ReviewPanel(ttk.Frame):
         self.composite_result: coexpression.CoexpressionResult | None = None
         self.composite_snap_kept = 0
 
-        self.mode = "review"  # "review" | "draw" | "delete"
+        # Rescan review: after a sweep finishes, current_filename/current_cells
+        # stay pointed at the real channel being rescanned (so the background art
+        # and viewport machinery need nothing rescan-specific) while this flag
+        # swaps what _render_and_blit draws and what clicks do.
+        self.viewing_rescan_review = False
+        self.rescan_combos: list[rescan.RescanCombo] = []
+        self.rescan_combo_index = 0
+        self.rescan_crop_rect: tuple[float, float, float, float] | None = None
+        self.rescan_accepted: dict[tuple[int, int], dict] = {}  # (combo_index, local_cell_id) -> cell dict
+        self._rescan_in_progress = False
+
+        self.mode = "review"  # "review" | "draw" | "delete" | "rescan"
         self.draw_points: list[tuple[float, float]] = []
         self._last_draw_click_time: float | None = None
         self._last_draw_click_screen: tuple[int, int] | None = None
@@ -313,7 +434,8 @@ class ReviewPanel(ttk.Frame):
 
         self.mode_var = tk.StringVar(value="review")
         self.mode_radio_buttons: list[ttk.Radiobutton] = []
-        for label, value in [("Review", "review"), ("Draw", "draw"), ("Delete", "delete")]:
+        for label, value in [("Review", "review"), ("Draw", "draw"), ("Delete", "delete"),
+                              ("Rescan", "rescan")]:
             rb = ttk.Radiobutton(toolbar, text=label, value=value, variable=self.mode_var,
                                   command=self._on_mode_change)
             rb.pack(side="left", padx=2)
@@ -447,12 +569,30 @@ class ReviewPanel(ttk.Frame):
             "Draw: click to place vertices; double-click or Enter closes (needs "
             "≥3 points); Esc cancels.\n\n"
             "Delete: click a cell to remove it.\n\n"
+            "Rescan: drag a region to try other Cellpose parameters on just that "
+            "crop.\n\n"
             "Ctrl+Z undoes, Ctrl+Shift+Z redoes — any number of times, including "
             "whole drag-select batches as one step.\n\n"
             "Hold right mouse button to hide outlines/masks."
         )
-        ttk.Label(right, text=instructions, wraplength=180, foreground="#666").pack(
-            anchor="w", padx=10, pady=(0, 10))
+        self.instructions_label = ttk.Label(right, text=instructions, wraplength=180, foreground="#666")
+        self.instructions_label.pack(anchor="w", padx=10, pady=(0, 10))
+
+        # Rescan review controls — hidden until a sweep finishes; replaces the
+        # instructions text in the same spot while active.
+        self.rescan_controls_frame = ttk.Frame(right)
+        nav = ttk.Frame(self.rescan_controls_frame)
+        nav.pack(fill="x", pady=(0, 6))
+        ttk.Button(nav, text="< Prev", command=self._rescan_prev_combo).pack(side="left", expand=True, fill="x")
+        ttk.Button(nav, text="Next >", command=self._rescan_next_combo).pack(
+            side="left", expand=True, fill="x", padx=(4, 0))
+        ttk.Button(self.rescan_controls_frame, text="Merge Accepted",
+                   command=self._rescan_merge).pack(fill="x", pady=(0, 4))
+        ttk.Button(self.rescan_controls_frame, text="Discard Sweep",
+                   command=self._rescan_discard).pack(fill="x")
+        ttk.Label(self.rescan_controls_frame,
+                  text="Click a proposed cell to accept/un-accept it. Esc also discards.",
+                  wraplength=180, foreground="#666").pack(anchor="w", pady=(10, 0))
 
     def _var(self, name: str) -> tk.StringVar:
         if not hasattr(self, name):
@@ -481,7 +621,7 @@ class ReviewPanel(ttk.Frame):
 
     def _bind_global_keys(self) -> None:
         top = self.winfo_toplevel()
-        top.bind("<Escape>", lambda e: self._cancel_draw())
+        top.bind("<Escape>", lambda e: self._on_escape())
         top.bind("<Return>", lambda e: self._commit_draw() if self.mode == "draw" else None)
         top.bind("<KP_Enter>", lambda e: self._commit_draw() if self.mode == "draw" else None)
         top.bind("<Control-z>", lambda e: self._undo())
@@ -610,6 +750,7 @@ class ReviewPanel(ttk.Frame):
         if filename is None:
             return
 
+        self._rescan_discard()  # navigating away abandons any in-progress rescan review
         self._flush_current(sync=False)
         if self.current_filename is not None:
             self._save_ui_state()
@@ -658,9 +799,12 @@ class ReviewPanel(ttk.Frame):
         self.composite_tab_btn.state(["pressed"] if self.viewing_composite else ["!pressed"])
 
     def _update_mode_controls(self) -> None:
-        """Composite is view-only — no toggling/drawing/deleting on a derived
-        overlay, editing always happens on one real channel."""
-        widget_state = "disabled" if self.viewing_composite else "normal"
+        """Composite is view-only, and mid-rescan-review the mode selector is
+        moot (clicks there mean accept/reject, not Review/Draw/Delete/Rescan) —
+        both disable the whole radio group rather than one-off checks scattered
+        through every click handler."""
+        disabled = self.viewing_composite or self.viewing_rescan_review
+        widget_state = "disabled" if disabled else "normal"
         for rb in self.mode_radio_buttons:
             rb.configure(state=widget_state)
 
@@ -692,6 +836,7 @@ class ReviewPanel(ttk.Frame):
         if snap_filename is None:
             return
 
+        self._rescan_discard()  # navigating away abandons any in-progress rescan review
         self._flush_current(sync=False)
         if self.current_filename is not None:
             self._save_ui_state()
@@ -745,6 +890,184 @@ class ReviewPanel(ttk.Frame):
             f"{self.composite_snap_kept} SNAP kept (population)\n"
             f"{rate:.1f}% coexpression rate"
         )
+
+    # ------------------------------------------------------------------ #
+    # Rescan: crop -> parameter sweep -> review proposals -> merge
+    # ------------------------------------------------------------------ #
+    def _start_rescan(self, rect: tuple[float, float, float, float]) -> None:
+        if self._rescan_in_progress:
+            messagebox.showinfo("Rescan", "A rescan sweep is already running — wait for it to finish "
+                                 "before starting another.", parent=self)
+            return
+        x0, y0, x1, y1 = rect
+        if (x1 - x0) < MIN_RESCAN_SIZE or (y1 - y0) < MIN_RESCAN_SIZE:
+            messagebox.showinfo("Rescan", "Drag a larger region to rescan.", parent=self)
+            return
+        dialog = _RescanConfigDialog(self, crop_w=x1 - x0, crop_h=y1 - y0)
+        if dialog.result is None:
+            return
+        diameters, cellprobs = dialog.result
+        self._run_rescan_sweep(rect, diameters, cellprobs)
+
+    def _run_rescan_sweep(self, rect: tuple[float, float, float, float],
+                           diameters: list[float], cellprobs: list[float]) -> None:
+        target_filename = self.current_filename
+        target_path = self._current_path()
+        n_combos = len(diameters) * len(cellprobs)
+        self._rescan_in_progress = True
+        self.statusbar.set_message(f"Rescan: preparing {n_combos} combination(s)...")
+        # Snap the mode selector back to Review so the toolbar doesn't sit on
+        # "Rescan" while a sweep neither the user nor the toolbar can interact
+        # with is running in the background.
+        self.mode_var.set("review")
+        self.mode = "review"
+        self.canvas.configure(cursor="hand2")
+
+        def worker() -> None:
+            tmp_dir = Path(tempfile.mkdtemp(prefix="cellcounts_rescan_"))
+            try:
+                raw = imaging._load_grayscale_raw(target_path)
+                crop = rescan.crop_raw_region(raw, rect)
+                if crop.size == 0:
+                    self.after(0, lambda: messagebox.showerror(
+                        "Rescan", "Selected region is outside the image.", parent=self))
+                    self.after(0, self.statusbar.set_message, "Rescan cancelled.")
+                    return
+
+                def progress(i: int, total: int) -> None:
+                    self.after(0, self.statusbar.set_message, f"Rescan: combination {i}/{total}...")
+
+                combos = rescan.run_sweep(self.client, crop, (rect[0], rect[1]), diameters, cellprobs,
+                                           tmp_dir, on_progress=progress)
+                self.after(0, self._show_rescan_review, target_filename, rect, combos)
+            except Exception as exc:  # noqa: BLE001 — surfaced to the user, not swallowed
+                self.after(0, lambda: messagebox.showerror("Rescan failed", str(exc), parent=self))
+                self.after(0, self.statusbar.set_message, "Rescan failed.")
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                self._rescan_in_progress = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_rescan_review(self, target_filename: str, rect: tuple[float, float, float, float],
+                             combos: list[rescan.RescanCombo]) -> None:
+        ok_combos = [c for c in combos if c.error is None]
+        if not ok_combos:
+            first_error = combos[0].error if combos else "no combinations were run"
+            messagebox.showerror("Rescan failed", f"Every combination failed.\n\n{first_error}", parent=self)
+            self.statusbar.set_message("Rescan failed.")
+            return
+
+        if target_filename != self.current_filename:
+            # Navigated away while the sweep ran — the crop no longer applies to
+            # what's on screen. Don't silently show results against the wrong
+            # image; _select_image/_select_composite already discarded this.
+            messagebox.showinfo(
+                "Rescan", f"Rescan of {target_filename} finished, but you've since navigated "
+                "elsewhere. Reopen that channel and rescan again to review the results.",
+                parent=self)
+            return
+
+        n_failed = len(combos) - len(ok_combos)
+        self.rescan_combos = ok_combos
+        self.rescan_combo_index = 0
+        self.rescan_crop_rect = rect
+        self.rescan_accepted = {}
+        self.viewing_rescan_review = True
+        self.instructions_label.pack_forget()
+        self.rescan_controls_frame.pack(anchor="w", padx=10, pady=(0, 10), fill="x")
+        self._update_mode_controls()
+        self._fit_to_rect(rect)
+        self._update_rescan_review_display()
+        note = f" ({n_failed} combination(s) failed)" if n_failed else ""
+        self.statusbar.set_message(f"Rescan: reviewing {len(ok_combos)} combination(s){note}.")
+
+    def _fit_to_rect(self, rect: tuple[float, float, float, float]) -> None:
+        x0, y0, x1, y1 = rect
+        vw, vh = self._canvas_size()
+        rect_w, rect_h = max(1.0, x1 - x0), max(1.0, y1 - y0)
+        self.scale = min(vw / rect_w, vh / rect_h)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        self.origin = (cx - (vw / self.scale) / 2, cy - (vh / self.scale) / 2)
+
+    def _update_rescan_review_display(self) -> None:
+        combo = self.rescan_combos[self.rescan_combo_index]
+        kept = [c for c in combo.cells if c["status"] == "kept"]
+        self.filename_var.set(
+            f"Rescan {self.rescan_combo_index + 1}/{len(self.rescan_combos)}  "
+            f"(diameter={combo.diameter:g}, cellprob={combo.cellprob_threshold:g})")
+        self.counts_var.set(f"{len(kept)} proposed here\n{len(self.rescan_accepted)} accepted (all combos)")
+        self._redraw(full=True)
+
+    def _on_rescan_review_click(self, img_x: float, img_y: float) -> None:
+        combo = self.rescan_combos[self.rescan_combo_index]
+        kept = [c for c in combo.cells if c["status"] == "kept"]
+        cell = self._hit_test(img_x, img_y, kept)
+        if cell is None:
+            return
+        key = (self.rescan_combo_index, cell["id"])
+        if key in self.rescan_accepted:
+            del self.rescan_accepted[key]
+        else:
+            self.rescan_accepted[key] = {**cell, "_job_id": combo.job_id}
+        self._update_rescan_review_display()
+
+    def _rescan_prev_combo(self) -> None:
+        if not self.viewing_rescan_review:
+            return
+        self.rescan_combo_index = (self.rescan_combo_index - 1) % len(self.rescan_combos)
+        self._update_rescan_review_display()
+
+    def _rescan_next_combo(self) -> None:
+        if not self.viewing_rescan_review:
+            return
+        self.rescan_combo_index = (self.rescan_combo_index + 1) % len(self.rescan_combos)
+        self._update_rescan_review_display()
+
+    def _rescan_merge(self) -> None:
+        if not self.viewing_rescan_review:
+            return
+        if not self.rescan_accepted:
+            messagebox.showinfo("Rescan", "Nothing accepted yet — click proposed cells to accept them "
+                                 "before merging.", parent=self)
+            return
+        next_id = max((c["id"] for c in self.current_cells), default=0) + 1
+        merged = []
+        for accepted in self.rescan_accepted.values():
+            job_id = accepted["_job_id"]
+            new_cell = {k: v for k, v in accepted.items() if k != "_job_id"}
+            new_cell["id"] = next_id
+            new_cell["status"] = "kept"
+            new_cell["source"] = f"rescan:{job_id}"
+            new_cell["edited"] = True
+            next_id += 1
+            merged.append(new_cell)
+        self.current_cells.extend(merged)
+        self._push_undo(_AddManyAction(merged))
+        n_merged = len(merged)
+        self._rescan_exit_review()
+        self._update_counts()
+        self._redraw(full=True)
+        self.statusbar.set_message(f"Rescan: merged {n_merged} cell(s).")
+
+    def _rescan_discard(self, event=None) -> None:
+        if not self.viewing_rescan_review:
+            return
+        self._rescan_exit_review()
+        self._fit()
+        self.statusbar.set_message("Rescan discarded.")
+
+    def _rescan_exit_review(self) -> None:
+        """Shared cleanup between discarding and merging: drop the sweep state
+        and swap the sidebar back to the normal instructions."""
+        self.viewing_rescan_review = False
+        self.rescan_combos = []
+        self.rescan_combo_index = 0
+        self.rescan_crop_rect = None
+        self.rescan_accepted = {}
+        self.rescan_controls_frame.pack_forget()
+        self.instructions_label.pack(anchor="w", padx=10, pady=(0, 10))
+        self._update_mode_controls()
 
     # ------------------------------------------------------------------ #
     # Viewport / zoom / pan
@@ -863,6 +1186,9 @@ class ReviewPanel(ttk.Frame):
         if self.viewing_composite:
             self._blit(self._render_composite_overlay(bg, rect, vw, vh))
             return
+        if self.viewing_rescan_review:
+            self._blit(self._render_rescan_overlay(bg, rect, vw, vh))
+            return
         overlay = rendering.render_overlay(
             self.current_cells, rect, self.scale, (vw, vh),
             self.ui_state["render_mode"], self.ui_state["channel_colors"][self.current_channel])
@@ -892,13 +1218,33 @@ class ReviewPanel(ttk.Frame):
 
         return rendering.composite(bg, cck_layer, chr_layer, highlight_layer)
 
+    def _render_rescan_overlay(self, bg, rect, vw: int, vh: int):
+        """The current combination's proposed cells: undecided ones outlined in
+        yellow, accepted ones filled solid green. All rescan-returned cells come
+        back `status: "kept"` (the server already dropped what it filtered out),
+        so channel_color drives every cell's color uniformly here — the
+        kept/filtered split render_overlay normally does doesn't apply."""
+        combo = self.rescan_combos[self.rescan_combo_index]
+        accepted_keys = {key for key in self.rescan_accepted if key[0] == self.rescan_combo_index}
+        accepted_ids = {key[1] for key in accepted_keys}
+        pending = [c for c in combo.cells if c["id"] not in accepted_ids]
+        accepted = [c for c in combo.cells if c["id"] in accepted_ids]
+
+        pending_layer = rendering.render_overlay(
+            pending, rect, self.scale, (vw, vh), "outline", RESCAN_PROPOSED_COLOR)
+        accepted_layer = rendering.render_overlay(
+            accepted, rect, self.scale, (vw, vh), "mask", RESCAN_ACCEPTED_COLOR)
+        return rendering.composite(bg, pending_layer, accepted_layer)
+
     # ------------------------------------------------------------------ #
     # Hit-testing
     # ------------------------------------------------------------------ #
-    def _hit_test(self, img_x: float, img_y: float) -> dict | None:
+    def _hit_test(self, img_x: float, img_y: float, cells: list[dict] | None = None) -> dict | None:
+        if cells is None:
+            cells = self.current_cells
         candidates = []
         pad = 2.0 / self.scale
-        for cell in self.current_cells:
+        for cell in cells:
             bx0, by0, bx1, by1 = geometry.bbox_of(cell["polygons"])
             if bx0 - pad <= img_x <= bx1 + pad and by0 - pad <= img_y <= by1 + pad:
                 if geometry.point_in_any_ring(img_x, img_y, cell["polygons"]):
@@ -908,7 +1254,7 @@ class ReviewPanel(ttk.Frame):
 
         tol = 10.0 / self.scale
         best, best_d = None, tol
-        for cell in self.current_cells:
+        for cell in cells:
             dx, dy = cell["centroid"][0] - img_x, cell["centroid"][1] - img_y
             d = (dx * dx + dy * dy) ** 0.5
             if d < best_d:
@@ -926,14 +1272,14 @@ class ReviewPanel(ttk.Frame):
         self._drag_rect_id = None
 
     def _on_canvas_drag(self, event) -> None:
-        if self._press_pos is None or self.viewing_composite:
+        if self._press_pos is None or self.viewing_composite or self.viewing_rescan_review:
             return
         sx, sy = self._press_pos
         if not self._dragging:
             if abs(event.x - sx) < DRAG_THRESHOLD and abs(event.y - sy) < DRAG_THRESHOLD:
                 return
-            if self.mode != "review":
-                return  # drag-select only applies in Review mode
+            if self.mode not in ("review", "rescan"):
+                return  # drag-select/drag-to-crop only apply in Review/Rescan mode
             self._dragging = True
         if self._drag_rect_id is None:
             self._drag_rect_id = self.canvas.create_rectangle(
@@ -954,6 +1300,12 @@ class ReviewPanel(ttk.Frame):
 
         if self.viewing_composite:
             return  # Composite is view-only, regardless of the mode selector's value
+
+        if self.viewing_rescan_review:
+            if not was_dragging:
+                img_x, img_y = self._screen_to_image(event.x, event.y)
+                self._on_rescan_review_click(img_x, img_y)
+            return
 
         if self.mode == "review":
             if was_dragging:
@@ -977,6 +1329,11 @@ class ReviewPanel(ttk.Frame):
                 self._push_undo(_RemoveAction(cell))
                 self._redraw(full=True)
                 self._update_counts()
+
+        elif self.mode == "rescan" and was_dragging:
+            x0, y0 = self._screen_to_image(sx, sy)
+            x1, y1 = self._screen_to_image(event.x, event.y)
+            self._start_rescan((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
 
     # ------------------------------------------------------------------ #
     # Review mode actions
@@ -1069,6 +1426,12 @@ class ReviewPanel(ttk.Frame):
             self.draw_points = []
             self._redraw(full=True)
 
+    def _on_escape(self) -> None:
+        if self.viewing_rescan_review:
+            self._rescan_discard()
+        else:
+            self._cancel_draw()
+
     # ------------------------------------------------------------------ #
     # Undo/redo
     # ------------------------------------------------------------------ #
@@ -1109,7 +1472,7 @@ class ReviewPanel(ttk.Frame):
     def _on_mode_change(self) -> None:
         self.mode = self.mode_var.get()
         self.draw_points = []
-        cursors = {"review": "hand2", "draw": "tcross", "delete": "X_cursor"}
+        cursors = {"review": "hand2", "draw": "tcross", "delete": "X_cursor", "rescan": "crosshair"}
         self.canvas.configure(cursor=cursors.get(self.mode, "arrow"))
         self._redraw(full=True)
 

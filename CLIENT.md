@@ -109,12 +109,27 @@ Review** to come back).
   button reads **Inactive** and is grayed out — there's nothing for it to start or
   stop. Your queue order and paused/running state are saved per folder and
   restored next time you open it, same as everything else below.
-- **Mode** (top left: Review / Draw / Delete):
+- **Mode** (top left: Review / Draw / Delete / Rescan):
   - **Review** — click a cell to toggle it between kept and not-a-cell; drag a
     rectangle to select several at once and mark them all together.
   - **Draw** — click to place each corner of a new cell outline; double-click, or
     press Enter, to close it (needs at least 3 points); Esc cancels.
   - **Delete** — click a cell to remove it outright.
+  - **Rescan** — got a spot where the model missed cells or merged two together?
+    Drag a rectangle around just that region. A dialog asks which Cellpose
+    parameters to try — comma-separated **Diameter** (px, `0` = auto) and **Cell
+    probability threshold** values, e.g. `0, 15, 30` × `-2, 0, 2` tries all 9
+    combinations. Each one is a small, independent upload — only the crop is
+    sent, not the whole image, so this is quick even on a huge source file.
+    When it's done, the screen switches to reviewing the results: **< Prev /
+    Next >** cycles through each combination's proposed cells zoomed into that
+    region; click a proposed cell to accept or un-accept it (accepted ones fill
+    solid green, undecided ones stay outlined in yellow) — you can accept cells
+    from more than one combination before merging. **Merge Accepted** adds
+    everything you picked into the real image (tagged so you can tell they came
+    from a rescan, with full Ctrl+Z undo support); **Discard Sweep** (or Esc)
+    throws the whole thing away with no changes made. Unavailable on the
+    Composite tab, same as Draw/Delete.
 - **Undo/redo** — **Ctrl+Z** undoes, **Ctrl+Shift+Z** redoes, as many times as you
   like (toggles, deletes, and draws are all covered). A drag-select batch that
   marks several cells at once undoes/redoes as a single step, not cell by cell.
@@ -170,9 +185,7 @@ A `cellcounts.json` in the folder you picked (image processing status), one
 `<filename>.cells.json` per image (its detected cells), and a small
 `cellcounts.queue.json` (queue order and paused/running state) — don't delete
 these, they're what makes re-opening the same folder fast and what your review
-edits and queue arrangement are saved into. Crop-based rescan is coming in a later
-update on top of this same format, so nothing you do now needs to be redone once
-it lands.
+edits and queue arrangement are saved into.
 
 ## Troubleshooting
 
