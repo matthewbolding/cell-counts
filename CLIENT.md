@@ -29,9 +29,14 @@ python client/app.py
    it. Check **Remember me on this computer** to skip retyping it next time — it's
    saved to `~/.cellcounts/credentials.json` on your machine only (never part of
    the repo), readable only by your own account. Leave it unchecked, or uncheck it
-   and sign in again, to forget a previously-remembered login.
-2. **Pick a folder.** A folder picker opens — choose the folder containing your
-   `{PREFIX}_{CCK,CHR,SNAP}.tif` images (e.g. `A1_SNAP.tif`, `A1_CCK.tif`, ...).
+   and sign in again, to forget a previously-remembered login. There's also an
+   **Open the same folder as last time** checkbox (grayed out until you've opened
+   at least one folder) that skips the folder picker below entirely and jumps
+   straight back into whichever folder you had open last — handy when you're in
+   and out of the same folder repeatedly.
+2. **Pick a folder.** Unless you checked the box above, a folder picker opens —
+   choose the folder containing your `{PREFIX}_{CCK,CHR,SNAP}.tif` images (e.g.
+   `A1_SNAP.tif`, `A1_CCK.tif`, ...).
 3. **The review screen opens right away** — you don't have to wait for processing
    to finish before you can look around. In the background, the app hashes every
    recognized image and skips anything already processed (tracked in a
@@ -67,7 +72,11 @@ Review** to come back).
 
 - **Samples** (left, top) — every animal+sample prefix found in this folder (e.g.
   `A3`). Pick one, then a **CCK / CHR / SNAP** tab above the image to switch
-  channels. Each sample row has three small readiness dots, one per channel, in
+  channels. Zoomed into a region on CCK and flip to CHR (or Composite)? You'll see
+  that same region — pan/zoom carries over across tabs *within a sample*, since
+  they're simultaneous channels of the same physical field of view. It only resets
+  to fit-to-window when you pick a different sample. Each sample row has three
+  small readiness dots, one per channel, in
   SNAP/CCK/CHR order (matching the tab order above the image):
   - **red** — not ready (not yet processed, or that channel doesn't exist for this
     sample).
@@ -77,18 +86,29 @@ Review** to come back).
   with no outlines yet, and the cells will pop in automatically once that channel
   finishes, if you're still looking at it. With a lot of samples the list scrolls
   (mouse wheel or the scrollbar) the same way the Queue list below it does.
+- **Composite tab** — a fifth tab, next to SNAP/CCK/CHR, that lights up once all
+  three channels for that sample are done. Shows CCK and CHR overlaid on the SNAP
+  image at once (translucent, so real overlap between the two reads as a blended
+  color), with every cell counted as coexpressing outlined in white. The right
+  panel shows the actual numbers: coexpressing pairs, SNAP kept count (the
+  population these are measured against), and the coexpression rate. This tab is
+  view-only — Review/Draw/Delete are disabled while it's open, since editing
+  always happens on one real channel, never on this derived view.
 - **Queue** (left, bottom) — the files still waiting to be uploaded/segmented, in
-  the order they'll run. Click to select one; Ctrl-click to add/remove individual
-  files from the selection; Shift-click to select a whole range — the standard
-  paradigm. Four buttons reorder the selection: **▲** (up one), **▼** (down one),
-  **▲▲** (send to top), **▼▼** (send to bottom). A multi-selection moves as a
-  block — the items you selected keep their order relative to each other, they
-  just all shift together (only affects files that haven't started yet — the one
-  currently "(processing)" can't be reordered or reprioritized past). **Start/Stop**
-  pauses and resumes the queue; Stop finishes whatever file is already in flight
+  the order they'll run, styled the same as the Samples list above it. Click to
+  select one; Ctrl-click to add/remove individual files from the selection;
+  Shift-click to select a whole range — the standard paradigm. The row currently
+  being uploaded/segmented is tinted amber rather than labeled — it also can't be
+  reordered or reprioritized past. Four buttons reorder the selection: **▲** (up
+  one), **▼** (down one), **▲▲** (send to top), **▼▼** (send to bottom). A
+  multi-selection moves as a block — the items you selected keep their order
+  relative to each other, they just all shift together. **Start/Stop** pauses and
+  resumes the queue; Stop finishes whatever file is already in flight
   before pausing (there's no way to cancel a file mid-segmentation), so don't
-  expect it to stop instantly. Your queue order and paused/running state are saved
-  per folder and restored next time you open it, same as everything else below.
+  expect it to stop instantly. When there's nothing queued or in flight, the
+  button reads **Inactive** and is grayed out — there's nothing for it to start or
+  stop. Your queue order and paused/running state are saved per folder and
+  restored next time you open it, same as everything else below.
 - **Mode** (top left: Review / Draw / Delete):
   - **Review** — click a cell to toggle it between kept and not-a-cell; drag a
     rectangle to select several at once and mark them all together.
@@ -117,15 +137,42 @@ remembered per folder and restored the next time you open it (stored in
 Edits save automatically a moment after you make them — there's no separate save
 step, and quitting the app flushes any pending edit first.
 
+## Exporting
+
+**File > Export Data...** opens a dialog before anything gets written:
+
+- **Samples to export** — every sample in the folder, checked by default (Select
+  All / Select None to bulk-toggle), each with the same red/blue/green readiness
+  dots as the sidebar so you can see what has data before picking it. Uncheck
+  anything you don't want — handy in a large folder where you only care about a
+  few samples right now and exporting everything would mean waiting on (and
+  scrolling through) a lot of data you don't need yet.
+- **Include** — Summary sheet, Cells sheet, or both (at least one is required).
+
+Export works regardless of processing state — a sample doesn't need all three
+channels done to be included. Whatever's missing for a given sample shows up as
+`###` in the Summary sheet (e.g. a `chr_kept` of `###` means CHR hasn't been
+processed for that sample yet) rather than silently dropping the whole row. A
+channel that *has* been processed but genuinely detected zero kept cells still
+shows a real `0` — those are different, worth-knowing-apart facts. Coexpression
+pairs/rate show `###` whenever they can't be computed yet (either CCK or CHR
+missing, or a zero-cell SNAP population makes a rate undefined).
+
+Output is one `.xlsx` workbook with your requested sheet(s) — "Summary" (one row
+per sample) and/or "Cells" (one row per kept cell across every included
+sample/channel with data, with a coexpressing yes/no/`###` column for CCK/CHR
+rows). These are the same coexpression numbers shown in the Composite tab,
+computed the same way, so the two never disagree.
+
 ## What you get
 
 A `cellcounts.json` in the folder you picked (image processing status), one
 `<filename>.cells.json` per image (its detected cells), and a small
 `cellcounts.queue.json` (queue order and paused/running state) — don't delete
 these, they're what makes re-opening the same folder fast and what your review
-edits and queue arrangement are saved into. Coexpression view/export and
-crop-based rescan are coming in later updates on top of this same format, so
-nothing you do now needs to be redone once they land.
+edits and queue arrangement are saved into. Crop-based rescan is coming in a later
+update on top of this same format, so nothing you do now needs to be redone once
+it lands.
 
 ## Troubleshooting
 

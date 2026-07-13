@@ -9,7 +9,14 @@
 # client now loads and contrast-stretches the original TIFFs itself to render the
 # review screen. All three have prebuilt wheels on Windows/macOS — no compiler, no
 # admin rights needed, same install story as before, just one `pip install` away.
+#
+# scikit-image (coexpression.py's polygon-overlap rasterization) and openpyxl
+# (XLSX export) round out the list for the same reason: both ship prebuilt wheels,
+# no compiler needed, and both were chosen specifically to avoid heavier
+# alternatives (shapely, pandas) for what's a small slice of what each offers.
 requests
 numpy
 tifffile
 pillow
+scikit-image
+openpyxl

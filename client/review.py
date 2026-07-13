@@ -16,10 +16,12 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import colorchooser, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from PIL import ImageTk
 
+import coexpression
+import export
 import geometry
 import imaging
 import rendering
@@ -49,11 +51,22 @@ DOT_COLORS = {
 }
 ROW_BG = "#f0f0f0"
 ROW_BG_SELECTED = "#cce0ff"
+# Queue rows use the same base look as Samples rows (ROW_BG/ROW_BG_SELECTED) plus
+# two of their own: a fill for "this file is being processed right now" (kept
+# distinct from the blue selection color so a row that's both selected and
+# in-flight doesn't read as ambiguous) and a border color that marks selection via
+# an outline instead of a fill, so it layers on top of the processing fill cleanly.
+QUEUE_PROCESSING_BG = "#fff2cc"
+QUEUE_SELECTED_BORDER = "#2980b9"
 # ttk.Scrollbar's default theme renders near-white on some platforms, which
 # disappears against the light widgets it sits next to — plain tk.Scrollbar with
 # explicit colors instead, for one that's actually visible everywhere.
 SCROLLBAR_COLORS = dict(background="#a0a0a0", troughcolor="#e8e8e8", activebackground="#808080",
                          highlightthickness=0, bd=0)
+# The Composite tab's coexpressing-cell outline — a fixed attention color, not a
+# channel color, so it doesn't collide with the existing "filtered = gray"
+# convention or either channel's own color.
+COEXPRESS_HIGHLIGHT_COLOR = "#ffffff"
 
 
 # ---------------------------------------------------------------------- #
@@ -104,6 +117,109 @@ class _ModifyAction:
             cell["status"], cell["edited"] = after
 
 
+class _ExportDialog(tk.Toplevel):
+    """File > Export Data... — pick which samples to include and which sheet(s).
+
+    A dedicated dialog rather than overloading the Samples sidebar's click
+    behavior with a second, unrelated meaning (multi-select-for-export vs.
+    click-to-navigate) — this keeps every export decision in one clearly-labeled
+    place instead of splitting them between a sidebar gesture and a follow-up
+    prompt.
+    """
+
+    def __init__(self, parent, samples: dict[str, dict[str, str]], channel_status_fn):
+        super().__init__(parent)
+        self.title("Export Data")
+        self.resizable(False, False)
+        self.result: tuple[list[str], bool, bool] | None = None
+
+        outer = ttk.Frame(self, padding=16)
+        outer.pack(fill="both", expand=True)
+
+        ttk.Label(outer, text="Samples to export:", font=("", 10, "bold")).pack(anchor="w")
+        list_wrap = ttk.Frame(outer)
+        list_wrap.pack(fill="both", expand=True, pady=(4, 6))
+        canvas = tk.Canvas(list_wrap, highlightthickness=0, bg=ROW_BG, width=260, height=200)
+        scroll = tk.Scrollbar(list_wrap, orient="vertical", command=canvas.yview, **SCROLLBAR_COLORS)
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        rows_frame = tk.Frame(canvas, bg=ROW_BG)
+        window = canvas.create_window((0, 0), window=rows_frame, anchor="nw")
+        rows_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(window, width=e.width))
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+        # Readiness dots alongside each checkbox — same colors as the sidebar —
+        # so it's obvious at a glance which samples have real data to offer
+        # before picking them, without having to leave this dialog to check.
+        self._sample_vars: dict[str, tk.BooleanVar] = {}
+        for prefix in sorted(samples.keys()):
+            var = tk.BooleanVar(value=True)
+            row = tk.Frame(rows_frame, bg=ROW_BG)
+            row.pack(fill="x")
+            tk.Checkbutton(row, text=prefix, variable=var, bg=ROW_BG, anchor="w",
+                            activebackground=ROW_BG, highlightthickness=0).pack(
+                side="left", fill="x", expand=True, padx=(4, 2), pady=2)
+            for ch in CHANNELS:
+                dot = tk.Canvas(row, width=10, height=10, highlightthickness=0, bg=ROW_BG)
+                dot.create_oval(1, 1, 9, 9, outline="", fill=DOT_COLORS[channel_status_fn(prefix, ch)])
+                dot.pack(side="left", padx=2)
+            self._sample_vars[prefix] = var
+
+        select_row = ttk.Frame(outer)
+        select_row.pack(fill="x", pady=(0, 10))
+        ttk.Button(select_row, text="Select All", command=lambda: self._set_all(True)).pack(side="left")
+        ttk.Button(select_row, text="Select None", command=lambda: self._set_all(False)).pack(
+            side="left", padx=(6, 0))
+
+        ttk.Separator(outer, orient="horizontal").pack(fill="x", pady=(0, 10))
+
+        ttk.Label(outer, text="Include:", font=("", 10, "bold")).pack(anchor="w")
+        self.summary_var = tk.BooleanVar(value=True)
+        self.cells_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(outer, text="Summary sheet (one row per sample)",
+                         variable=self.summary_var).pack(anchor="w", pady=(4, 0))
+        ttk.Checkbutton(outer, text="Cells sheet (one row per kept cell)",
+                         variable=self.cells_var).pack(anchor="w")
+
+        buttons = ttk.Frame(outer)
+        buttons.pack(fill="x", pady=(16, 0))
+        ttk.Button(buttons, text="Cancel", command=self._on_cancel).pack(side="right")
+        ttk.Button(buttons, text="Export...", command=self._on_submit, default="active").pack(
+            side="right", padx=(0, 6))
+
+        self.bind("<Escape>", lambda e: self._on_cancel())
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        self.transient(parent)
+        self.update_idletasks()
+        self.grab_set()
+        self.wait_window(self)
+
+    def _set_all(self, value: bool) -> None:
+        for var in self._sample_vars.values():
+            var.set(value)
+
+    def _on_submit(self) -> None:
+        prefixes = [p for p, var in self._sample_vars.items() if var.get()]
+        include_summary = self.summary_var.get()
+        include_cells = self.cells_var.get()
+        if not prefixes:
+            messagebox.showinfo("Export Data", "Select at least one sample to export.", parent=self)
+            return
+        if not include_summary and not include_cells:
+            messagebox.showinfo("Export Data", "Select at least Summary or Cells to include.", parent=self)
+            return
+        self.result = (sorted(prefixes), include_summary, include_cells)
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
 class ReviewPanel(ttk.Frame):
     def __init__(self, parent, folder: Path, manifest: Manifest, statusbar,
                  recognized: list[ScannedFile], queue: ProcessingQueue):
@@ -121,12 +237,25 @@ class ReviewPanel(ttk.Frame):
         self._sample_rows: dict[str, dict] = {}
         self._queue_display_items: list = []
         self._queue_display_signature: list = []
+        self._queue_row_widgets: dict[str, dict] = {}
+        self._queue_selected: set[str] = set()
+        self._queue_last_clicked: str | None = None
         self._known_done: set[str] = set()
 
         self.current_prefix: str | None = None
         self.current_channel: str | None = None
         self.current_filename: str | None = None
         self.current_cells: list[dict] = []
+
+        # Composite ("Composite" tab): view-only overlay of a sample's CCK+CHR
+        # kept cells with coexpressing ones outlined. Reuses the single-channel
+        # viewport machinery by pointing current_filename at that sample's SNAP
+        # image (the background art) — see _select_composite.
+        self.viewing_composite = False
+        self.composite_cck_cells: list[dict] = []
+        self.composite_chr_cells: list[dict] = []
+        self.composite_result: coexpression.CoexpressionResult | None = None
+        self.composite_snap_kept = 0
 
         self.mode = "review"  # "review" | "draw" | "delete"
         self.draw_points: list[tuple[float, float]] = []
@@ -183,9 +312,12 @@ class ReviewPanel(ttk.Frame):
         toolbar.pack(side="top", fill="x", padx=6, pady=4)
 
         self.mode_var = tk.StringVar(value="review")
+        self.mode_radio_buttons: list[ttk.Radiobutton] = []
         for label, value in [("Review", "review"), ("Draw", "draw"), ("Delete", "delete")]:
-            ttk.Radiobutton(toolbar, text=label, value=value, variable=self.mode_var,
-                             command=self._on_mode_change).pack(side="left", padx=2)
+            rb = ttk.Radiobutton(toolbar, text=label, value=value, variable=self.mode_var,
+                                  command=self._on_mode_change)
+            rb.pack(side="left", padx=2)
+            self.mode_radio_buttons.append(rb)
 
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
         self.render_mode_btn = ttk.Button(toolbar, text="Mode: Outline", command=self._toggle_render_mode)
@@ -236,33 +368,36 @@ class ReviewPanel(ttk.Frame):
             "<Configure>", lambda e: self.sample_canvas.configure(scrollregion=self.sample_canvas.bbox("all")))
         self.sample_canvas.bind(
             "<Configure>", lambda e: self.sample_canvas.itemconfig(self._sample_rows_window, width=e.width))
-        self.sample_canvas.bind(
-            "<MouseWheel>", lambda e: self.sample_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
-        self.sample_canvas.bind("<Button-4>", lambda e: self.sample_canvas.yview_scroll(-1, "units"))
-        self.sample_canvas.bind("<Button-5>", lambda e: self.sample_canvas.yview_scroll(1, "units"))
+        self._bind_wheel_scroll(self.sample_canvas, self.sample_canvas)
         pane.add(samples_outer, weight=2)
 
         # --- Queue (bottom pane): pending work, Start/Stop, and reorder controls.
+        # Same scrollable-custom-rows idiom as Samples above (not a plain Listbox)
+        # so the two panels look and feel like one consistent design.
         queue_outer = ttk.Frame(pane)
         queue_header = ttk.Frame(queue_outer)
         queue_header.pack(fill="x", padx=8, pady=(8, 2))
         ttk.Label(queue_header, text="Queue", font=("", 10, "bold")).pack(side="left")
-        self.queue_toggle_btn = ttk.Button(queue_header, text="Stop", width=8,
-                                            command=self._toggle_queue_running)
+        self.queue_toggle_btn = ttk.Button(queue_header, text="Inactive", width=8,
+                                            state="disabled", command=self._toggle_queue_running)
         self.queue_toggle_btn.pack(side="right")
 
-        queue_listf = ttk.Frame(queue_outer)
-        queue_listf.pack(fill="both", expand=True, padx=8, pady=(0, 4))
-        # extended selection: click selects one, Ctrl/Shift-click add to the
-        # selection (individual items or a range) — needed so multiple queued
-        # files can be bumped together as a block.
-        self.queue_listbox = tk.Listbox(queue_listf, exportselection=False, height=6,
-                                         selectmode="extended")
-        queue_scroll = tk.Scrollbar(queue_listf, orient="vertical", command=self.queue_listbox.yview,
+        queue_wrap = ttk.Frame(queue_outer)
+        queue_wrap.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        self.queue_canvas = tk.Canvas(queue_wrap, highlightthickness=0, bg=ROW_BG)
+        queue_scroll = tk.Scrollbar(queue_wrap, orient="vertical", command=self.queue_canvas.yview,
                                      **SCROLLBAR_COLORS)
-        self.queue_listbox.configure(yscrollcommand=queue_scroll.set)
-        self.queue_listbox.pack(side="left", fill="both", expand=True)
+        self.queue_canvas.configure(yscrollcommand=queue_scroll.set)
+        self.queue_canvas.pack(side="left", fill="both", expand=True)
         queue_scroll.pack(side="right", fill="y")
+        self.queue_rows_frame = tk.Frame(self.queue_canvas, bg=ROW_BG)
+        self._queue_rows_window = self.queue_canvas.create_window(
+            (0, 0), window=self.queue_rows_frame, anchor="nw")
+        self.queue_rows_frame.bind(
+            "<Configure>", lambda e: self.queue_canvas.configure(scrollregion=self.queue_canvas.bbox("all")))
+        self.queue_canvas.bind(
+            "<Configure>", lambda e: self.queue_canvas.itemconfig(self._queue_rows_window, width=e.width))
+        self._bind_wheel_scroll(self.queue_canvas, self.queue_canvas)
 
         # 2x2 matrix, symbols only: rows are up/down, columns are one-step/all-the-
         # way. Grid (not pack) so all four cells always divide the space evenly
@@ -291,6 +426,9 @@ class ReviewPanel(ttk.Frame):
             btn = ttk.Button(tabs, text=ch, command=lambda c=ch: self._on_channel_select(c))
             btn.pack(side="left", padx=4)
             self.channel_tab_buttons[ch] = btn
+        ttk.Separator(tabs, orient="vertical").pack(side="left", fill="y", padx=4)
+        self.composite_tab_btn = ttk.Button(tabs, text="Composite", command=self._on_composite_select)
+        self.composite_tab_btn.pack(side="left", padx=4)
 
         canvas_frame = ttk.Frame(center)
         canvas_frame.pack(fill="both", expand=True, padx=4, pady=4)
@@ -357,15 +495,15 @@ class ReviewPanel(ttk.Frame):
     # ------------------------------------------------------------------ #
     # Navigation
     # ------------------------------------------------------------------ #
-    def _bind_sample_scroll(self, widget) -> None:
+    def _bind_wheel_scroll(self, widget, canvas) -> None:
         """Wheel events go to whatever widget is directly under the cursor, not to
         the scrollable canvas underneath it — without this, scrolling only works
         in the sliver of empty canvas below the last row, not over an actual row
-        (label/dots), which is nearly the entire visible list."""
-        widget.bind("<MouseWheel>", lambda e: self.sample_canvas.yview_scroll(
-            -1 if e.delta > 0 else 1, "units"))
-        widget.bind("<Button-4>", lambda e: self.sample_canvas.yview_scroll(-1, "units"))
-        widget.bind("<Button-5>", lambda e: self.sample_canvas.yview_scroll(1, "units"))
+        (label/dots), which is nearly the entire visible list. Shared by the
+        Samples and Queue panels, each scrolling their own canvas."""
+        widget.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        widget.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        widget.bind("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
 
     def _populate_sample_rows(self) -> None:
         for child in self.sample_rows_frame.winfo_children():
@@ -375,12 +513,12 @@ class ReviewPanel(ttk.Frame):
             row = tk.Frame(self.sample_rows_frame, bg=ROW_BG)
             row.pack(fill="x")
             row.bind("<Button-1>", lambda e, p=prefix: self._on_sample_row_click(p, None))
-            self._bind_sample_scroll(row)
+            self._bind_wheel_scroll(row, self.sample_canvas)
 
             name_label = tk.Label(row, text=prefix, anchor="w", bg=ROW_BG)
             name_label.pack(side="left", fill="x", expand=True, padx=(6, 2), pady=3)
             name_label.bind("<Button-1>", lambda e, p=prefix: self._on_sample_row_click(p, None))
-            self._bind_sample_scroll(name_label)
+            self._bind_wheel_scroll(name_label, self.sample_canvas)
 
             dots = {}
             for ch in CHANNELS:
@@ -388,7 +526,7 @@ class ReviewPanel(ttk.Frame):
                 oval = dot.create_oval(1, 1, 9, 9, outline="")
                 dot.pack(side="left", padx=2)
                 dot.bind("<Button-1>", lambda e, p=prefix, c=ch: self._on_sample_row_click(p, c))
-                self._bind_sample_scroll(dot)
+                self._bind_wheel_scroll(dot, self.sample_canvas)
                 dots[ch] = (dot, oval)
 
             self._sample_rows[prefix] = {"row": row, "name_label": name_label, "dots": dots}
@@ -452,6 +590,21 @@ class ReviewPanel(ttk.Frame):
     def _current_path(self) -> Path:
         return self.folder / self.current_filename
 
+    def _apply_viewport(self, same_sample: bool, display_array) -> None:
+        """Preserve the current pan/zoom when switching channels within the same
+        sample (SNAP/CCK/CHR/Composite are simultaneous channels of one
+        acquisition — the region you're looking at on CCK is still the same
+        physical region on CHR) — only reset to fit when landing on a genuinely
+        different sample's image, where the prior position wouldn't mean anything.
+        `imaging.crop_and_scale` already letterboxes a viewport that runs past an
+        image's bounds, so carrying `origin`/`scale` over unchanged is safe even in
+        the (unexpected) case that a sample's channels aren't all the same size.
+        """
+        if same_sample:
+            return
+        self.scale = self._fit_scale_for(display_array) * self.ui_state.get("zoom_multiplier", 1.0)
+        self._center_on(display_array)
+
     def _select_image(self, prefix: str, channel: str) -> None:
         filename = self.samples.get(prefix, {}).get(channel)
         if filename is None:
@@ -461,8 +614,10 @@ class ReviewPanel(ttk.Frame):
         if self.current_filename is not None:
             self._save_ui_state()
 
+        same_sample = prefix == self.current_prefix
         self.current_prefix, self.current_channel, self.current_filename = prefix, channel, filename
         self.current_cells = self.manifest.load_cells(filename)
+        self.viewing_composite = False
         self.draw_points = []
         self.mode_var.set("review")
         self.mode = "review"
@@ -473,23 +628,41 @@ class ReviewPanel(ttk.Frame):
         self.update_idletasks()
         display_array = self.image_cache.get(self._current_path())
 
-        self.scale = self._fit_scale_for(display_array) * self.ui_state.get("zoom_multiplier", 1.0)
-        self._center_on(display_array)
+        self._apply_viewport(same_sample, display_array)
 
         self.ui_state["last_image"] = filename
         self._update_sample_row_selection()
         self._update_channel_tabs()
+        self._update_mode_controls()
         self._update_swatches()
         self._update_render_mode_button()
         self._update_counts()
         self._redraw(full=True)
         self.statusbar.set_message(f"{filename} — {len(self.current_cells)} cell(s)")
 
+    def _composite_available(self, prefix: str) -> bool:
+        """All three channels processed for this sample — Composite needs kept
+        cells from all of them (CCK+CHR to overlay, SNAP for the population count)."""
+        channels = self.samples.get(prefix, {})
+        return all(ch in channels for ch in CHANNELS) and \
+            all(self._channel_status(prefix, ch) == "ready" for ch in CHANNELS)
+
     def _update_channel_tabs(self) -> None:
         available = self.samples.get(self.current_prefix, {})
         for ch, btn in self.channel_tab_buttons.items():
             btn.configure(state="normal" if ch in available else "disabled")
-            btn.state(["pressed"] if ch == self.current_channel else ["!pressed"])
+            btn.state(["pressed"] if (ch == self.current_channel and not self.viewing_composite)
+                      else ["!pressed"])
+        composite_ok = self.current_prefix is not None and self._composite_available(self.current_prefix)
+        self.composite_tab_btn.configure(state="normal" if composite_ok else "disabled")
+        self.composite_tab_btn.state(["pressed"] if self.viewing_composite else ["!pressed"])
+
+    def _update_mode_controls(self) -> None:
+        """Composite is view-only — no toggling/drawing/deleting on a derived
+        overlay, editing always happens on one real channel."""
+        widget_state = "disabled" if self.viewing_composite else "normal"
+        for rb in self.mode_radio_buttons:
+            rb.configure(state=widget_state)
 
     def _update_swatches(self) -> None:
         for ch, btn in self.color_buttons.items():
@@ -504,6 +677,74 @@ class ReviewPanel(ttk.Frame):
         edited = sum(1 for c in self.current_cells if c.get("edited"))
         self.filename_var.set(self.current_filename or "")
         self.counts_var.set(f"{kept} kept\n{total - kept} filtered\n{total} total\n{edited} edited")
+
+    # ------------------------------------------------------------------ #
+    # Composite tab: CCK+CHR overlay with coexpressing cells outlined
+    # ------------------------------------------------------------------ #
+    def _on_composite_select(self) -> None:
+        if self.current_prefix is None or not self._composite_available(self.current_prefix):
+            return
+        self._select_composite(self.current_prefix)
+
+    def _select_composite(self, prefix: str) -> None:
+        channels = self.samples.get(prefix, {})
+        snap_filename = channels.get("SNAP")
+        if snap_filename is None:
+            return
+
+        self._flush_current(sync=False)
+        if self.current_filename is not None:
+            self._save_ui_state()
+
+        same_sample = prefix == self.current_prefix
+        self.current_prefix = prefix
+        self.current_channel = "Composite"
+        # Background art is SNAP's own image (the general cell-population channel)
+        # — pointing current_filename at it means every bit of existing viewport
+        # math (fit/zoom/pan/image_cache) needs no composite-specific handling.
+        self.current_filename = snap_filename
+        self.viewing_composite = True
+        self.current_cells = []  # unused: composite is view-only, no hit-testing
+        self.draw_points = []
+        self.mode_var.set("review")
+        self.mode = "review"
+        self.canvas.configure(cursor="hand2")
+
+        self.composite_cck_cells = [c for c in self.manifest.load_cells(channels["CCK"])
+                                     if c["status"] == "kept"]
+        self.composite_chr_cells = [c for c in self.manifest.load_cells(channels["CHR"])
+                                     if c["status"] == "kept"]
+        self.composite_result = coexpression.compute_coexpression(
+            self.composite_cck_cells, self.composite_chr_cells)
+        snap_cells = self.manifest.load_cells(snap_filename)
+        self.composite_snap_kept = sum(1 for c in snap_cells if c["status"] == "kept")
+
+        self.image_cache.invalidate()
+        self.statusbar.set_message(f"Loading composite for {prefix}...")
+        self.update_idletasks()
+        display_array = self.image_cache.get(self._current_path())
+
+        self._apply_viewport(same_sample, display_array)
+
+        self.ui_state["last_image"] = snap_filename
+        self._update_sample_row_selection()
+        self._update_channel_tabs()
+        self._update_mode_controls()
+        self._update_swatches()
+        self._update_render_mode_button()
+        self._update_composite_counts()
+        self._redraw(full=True)
+        self.statusbar.set_message(f"Composite — {prefix}")
+
+    def _update_composite_counts(self) -> None:
+        n_pairs = len(self.composite_result.pairs) if self.composite_result else 0
+        rate = (n_pairs / self.composite_snap_kept * 100) if self.composite_snap_kept else 0.0
+        self.filename_var.set(f"{self.current_prefix} — Composite")
+        self.counts_var.set(
+            f"{n_pairs} coexpressing pair(s)\n"
+            f"{self.composite_snap_kept} SNAP kept (population)\n"
+            f"{rate:.1f}% coexpression rate"
+        )
 
     # ------------------------------------------------------------------ #
     # Viewport / zoom / pan
@@ -619,6 +860,9 @@ class ReviewPanel(ttk.Frame):
             self._blit(bg)
             return
         vw, vh = self._canvas_size()
+        if self.viewing_composite:
+            self._blit(self._render_composite_overlay(bg, rect, vw, vh))
+            return
         overlay = rendering.render_overlay(
             self.current_cells, rect, self.scale, (vw, vh),
             self.ui_state["render_mode"], self.ui_state["channel_colors"][self.current_channel])
@@ -626,6 +870,27 @@ class ReviewPanel(ttk.Frame):
         if self.mode == "draw" and self.draw_points:
             layers.append(rendering.render_in_progress_polygon(self.draw_points, rect, self.scale, (vw, vh)))
         self._blit(rendering.composite(bg, *layers))
+
+    def _render_composite_overlay(self, bg, rect, vw: int, vh: int):
+        """CCK + CHR both `mode="mask"` and translucent, so real overlap reads as
+        a blended color for free via alpha compositing — no separate blend logic
+        needed. A third outline-only layer, in a fixed non-channel color, marks
+        exactly the cells found coexpressing."""
+        cck_color = self.ui_state["channel_colors"]["CCK"]
+        chr_color = self.ui_state["channel_colors"]["CHR"]
+        cck_layer = rendering.render_overlay(
+            self.composite_cck_cells, rect, self.scale, (vw, vh), "mask", cck_color)
+        chr_layer = rendering.render_overlay(
+            self.composite_chr_cells, rect, self.scale, (vw, vh), "mask", chr_color)
+
+        highlight_cells = (
+            [c for c in self.composite_cck_cells if c["id"] in self.composite_result.cck_ids]
+            + [c for c in self.composite_chr_cells if c["id"] in self.composite_result.chr_ids]
+        ) if self.composite_result else []
+        highlight_layer = rendering.render_overlay(
+            highlight_cells, rect, self.scale, (vw, vh), "outline", COEXPRESS_HIGHLIGHT_COLOR)
+
+        return rendering.composite(bg, cck_layer, chr_layer, highlight_layer)
 
     # ------------------------------------------------------------------ #
     # Hit-testing
@@ -661,7 +926,7 @@ class ReviewPanel(ttk.Frame):
         self._drag_rect_id = None
 
     def _on_canvas_drag(self, event) -> None:
-        if self._press_pos is None:
+        if self._press_pos is None or self.viewing_composite:
             return
         sx, sy = self._press_pos
         if not self._dragging:
@@ -686,6 +951,9 @@ class ReviewPanel(ttk.Frame):
         self._drag_rect_id = None
         self._press_pos = None
         self._dragging = False
+
+        if self.viewing_composite:
+            return  # Composite is view-only, regardless of the mode selector's value
 
         if self.mode == "review":
             if was_dragging:
@@ -859,7 +1127,7 @@ class ReviewPanel(ttk.Frame):
         self.ui_state["channel_colors"][channel] = hex_color
         self._save_ui_state()
         self._update_swatches()
-        if channel == self.current_channel:
+        if channel == self.current_channel or (self.viewing_composite and channel in ("CCK", "CHR")):
             self._redraw(full=True)
 
     # ------------------------------------------------------------------ #
@@ -918,30 +1186,83 @@ class ReviewPanel(ttk.Frame):
 
     def _refresh_queue_panel(self) -> None:
         snap = self.queue.snapshot()
-        self.queue_toggle_btn.configure(text="Start" if not snap.running else "Stop")
+        if not snap.items:
+            # Nothing queued or in flight — Start/Stop has nothing to act on.
+            # Showing "Stop" here (the old behavior) implied something was
+            # running that a click could halt, which wasn't true.
+            self.queue_toggle_btn.configure(text="Inactive", state="disabled")
+        else:
+            self.queue_toggle_btn.configure(text=("Stop" if snap.running else "Start"), state="normal")
 
         signature = [(it.filename, it.status) for it in snap.items]
         if signature == self._queue_display_signature:
-            # Nothing actually changed since the last poll — leave the listbox
-            # completely untouched. Rebuilding it unconditionally on every
-            # 500ms tick (the old behavior) reset the scroll position to the top
-            # and clobbered Tk's selection anchor mid-gesture, breaking both
-            # scrolling and Shift-click range-select.
+            # Nothing actually changed since the last poll — leave the rows
+            # completely untouched. Rebuilding unconditionally on every 500ms
+            # tick (the old behavior) reset the scroll position to the top and
+            # clobbered selection mid-gesture, breaking both scrolling and
+            # Shift-click range-select.
             return
 
-        selected_filenames = self._selected_queue_filenames()
-        scroll_top = self.queue_listbox.yview()[0]
-        self.queue_listbox.delete(0, "end")
+        scroll_top = self.queue_canvas.yview()[0]
         self._queue_display_items = snap.items
         self._queue_display_signature = signature
-        for item in snap.items:
-            suffix = " (processing)" if item.status == "processing" else ""
-            self.queue_listbox.insert("end", f"{item.sf.prefix} · {item.sf.channel}{suffix}")
-        if selected_filenames:
-            for i, item in enumerate(snap.items):
-                if item.filename in selected_filenames:
-                    self.queue_listbox.selection_set(i)
-        self.queue_listbox.yview_moveto(scroll_top)
+        # Drop selection for anything no longer in the queue (completed, or
+        # claimed by the worker and finished) rather than let it accumulate.
+        self._queue_selected &= {it.filename for it in snap.items}
+        self._rebuild_queue_rows()
+        self.queue_canvas.yview_moveto(scroll_top)
+
+    def _rebuild_queue_rows(self) -> None:
+        for child in self.queue_rows_frame.winfo_children():
+            child.destroy()
+        self._queue_row_widgets = {}
+        for item in self._queue_display_items:
+            row = tk.Frame(self.queue_rows_frame, bg=ROW_BG, highlightthickness=2,
+                            highlightbackground=ROW_BG, highlightcolor=ROW_BG)
+            row.pack(fill="x")
+            label = tk.Label(row, text=f"{item.sf.prefix} · {item.sf.channel}", anchor="w", bg=ROW_BG)
+            label.pack(side="left", fill="x", expand=True, padx=(6, 4), pady=3)
+            for widget in (row, label):
+                widget.bind("<Button-1>", lambda e, fn=item.filename: self._on_queue_row_click(fn, e))
+                self._bind_wheel_scroll(widget, self.queue_canvas)
+            self._queue_row_widgets[item.filename] = {"row": row, "label": label}
+        self._refresh_queue_row_styles()
+
+    def _refresh_queue_row_styles(self) -> None:
+        for item in self._queue_display_items:
+            widgets = self._queue_row_widgets.get(item.filename)
+            if widgets is None:
+                continue
+            bg = QUEUE_PROCESSING_BG if item.status == "processing" else ROW_BG
+            border = QUEUE_SELECTED_BORDER if item.filename in self._queue_selected else bg
+            widgets["row"].configure(bg=bg, highlightbackground=border, highlightcolor=border)
+            widgets["label"].configure(bg=bg)
+
+    def _on_queue_row_click(self, filename: str, event) -> None:
+        # Standard multi-select paradigm, hand-rolled since these are plain
+        # Frames/Labels, not a native Listbox: plain click selects only this row;
+        # Ctrl-click toggles it in/out of the selection; Shift-click selects the
+        # contiguous range from the last-clicked row to this one. Tk's modifier
+        # bitmask (Shift=0x0001, Control=0x0004) is consistent across platforms.
+        shift = bool(event.state & 0x0001)
+        ctrl = bool(event.state & 0x0004)
+        order = [item.filename for item in self._queue_display_items]
+
+        if shift and self._queue_last_clicked in order and filename in order:
+            i0, i1 = order.index(self._queue_last_clicked), order.index(filename)
+            lo, hi = sorted((i0, i1))
+            self._queue_selected = set(order[lo:hi + 1])
+        elif ctrl:
+            if filename in self._queue_selected:
+                self._queue_selected.discard(filename)
+            else:
+                self._queue_selected.add(filename)
+            self._queue_last_clicked = filename
+        else:
+            self._queue_selected = {filename}
+            self._queue_last_clicked = filename
+
+        self._refresh_queue_row_styles()
 
     def _check_newly_done(self) -> None:
         # Single atomic snapshot call before iterating — the worker thread only
@@ -960,9 +1281,7 @@ class ReviewPanel(ttk.Frame):
             self._redraw(full=True)
 
     def _selected_queue_filenames(self) -> set[str]:
-        indices = self.queue_listbox.curselection()
-        return {self._queue_display_items[i].filename for i in indices
-                if i < len(self._queue_display_items)}
+        return set(self._queue_selected)
 
     def _toggle_queue_running(self) -> None:
         if self.queue.is_running:
@@ -994,6 +1313,42 @@ class ReviewPanel(ttk.Frame):
         if filenames:
             self.queue.send_to_back(filenames)
             self._refresh_queue_panel()
+
+    # ------------------------------------------------------------------ #
+    # Export (File > Export Data...)
+    # ------------------------------------------------------------------ #
+    def export_data(self) -> None:
+        if not self.samples:
+            messagebox.showinfo("Export Data", "No samples in this folder yet.", parent=self)
+            return
+
+        dialog = _ExportDialog(self, self.samples, self._channel_status)
+        if dialog.result is None:
+            return
+        prefixes, include_summary, include_cells = dialog.result
+
+        path_str = filedialog.asksaveasfilename(
+            title="Export Data",
+            initialfile=f"{self.folder.name}_export.xlsx",
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx")],
+            parent=self,
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+
+        summary_rows, cell_rows = export.build_export_rows(
+            prefixes, self.samples, self.manifest, self._channel_status)
+        try:
+            export.export_xlsx(path, summary_rows if include_summary else None,
+                                cell_rows if include_cells else None)
+        except OSError as exc:
+            messagebox.showerror("Export failed", str(exc), parent=self)
+            return
+
+        messagebox.showinfo("Export complete", f"Wrote:\n{path.name}", parent=self)
+        self.statusbar.set_message(f"Exported {len(prefixes)} sample(s) to {path.name}")
 
     def close(self) -> None:
         """Call before tearing this panel down (folder switch or app exit) — flushes

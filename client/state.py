@@ -56,3 +56,31 @@ def save_folder_state(folder: Path, state: dict) -> None:
     all_state = _load_all()
     all_state[str(folder.resolve())] = state
     _save_all(all_state)
+
+
+# Two extra top-level keys in the same file, alongside the folder-path-keyed
+# entries above — safe from collision since neither POSIX nor Windows absolute
+# paths start with "_".
+_LAST_FOLDER_KEY = "_last_folder"
+_REOPEN_LAST_FOLDER_KEY = "_reopen_last_folder"
+
+
+def get_last_folder() -> Path | None:
+    value = _load_all().get(_LAST_FOLDER_KEY)
+    return Path(value) if value else None
+
+
+def save_last_folder(folder: Path) -> None:
+    all_state = _load_all()
+    all_state[_LAST_FOLDER_KEY] = str(folder.resolve())
+    _save_all(all_state)
+
+
+def get_reopen_last_folder() -> bool:
+    return bool(_load_all().get(_REOPEN_LAST_FOLDER_KEY, False))
+
+
+def save_reopen_last_folder(value: bool) -> None:
+    all_state = _load_all()
+    all_state[_REOPEN_LAST_FOLDER_KEY] = value
+    _save_all(all_state)

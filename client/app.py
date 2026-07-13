@@ -26,6 +26,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import credentials
+import state
 from api_client import ApiClient, ApiError
 from manifest import Manifest, ScannedFile, hash_file, scan_folder
 from processing_queue import QUEUE_STATE_NAME, ProcessingQueue, QueueItem, load_persisted_order
@@ -43,7 +44,7 @@ class LoginDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("Cell Counts — Sign in")
         self.resizable(False, False)
-        self.result: tuple[str, str] | None = None
+        self.result: tuple[str, str, bool] | None = None
 
         form = ttk.Frame(self, padding=16)
         form.pack(fill="both", expand=True)
@@ -60,6 +61,16 @@ class LoginDialog(tk.Toplevel):
         ttk.Checkbutton(form, text="Remember me on this computer", variable=self.remember_var).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
+        last_folder = state.get_last_folder()
+        self.reopen_var = tk.BooleanVar(value=state.get_reopen_last_folder() if last_folder else False)
+        reopen_cb = ttk.Checkbutton(form, text="Open the same folder as last time", variable=self.reopen_var)
+        if last_folder is None:
+            reopen_cb.configure(state="disabled")
+        reopen_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        if last_folder is not None:
+            ttk.Label(form, text=str(last_folder), foreground="#666").grid(
+                row=4, column=0, columnspan=2, sticky="w", padx=(20, 0))
+
         remembered = credentials.load()
         if remembered is not None:
             username, password = remembered
@@ -68,7 +79,7 @@ class LoginDialog(tk.Toplevel):
             self.remember_var.set(True)
 
         buttons = ttk.Frame(form)
-        buttons.grid(row=3, column=0, columnspan=2, pady=(16, 0), sticky="e")
+        buttons.grid(row=5, column=0, columnspan=2, pady=(16, 0), sticky="e")
         ttk.Button(buttons, text="Cancel", command=self._on_cancel).pack(side="right", padx=(6, 0))
         ttk.Button(buttons, text="Sign In", command=self._on_submit, default="active").pack(side="right")
 
@@ -91,7 +102,8 @@ class LoginDialog(tk.Toplevel):
             credentials.save(username, password)
         else:
             credentials.clear()
-        self.result = (username, password)
+        state.save_reopen_last_folder(self.reopen_var.get())
+        self.result = (username, password, self.reopen_var.get())
         self.destroy()
 
     def _on_cancel(self) -> None:
@@ -139,11 +151,14 @@ class CellCountsApp(tk.Tk):
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self)
-        filemenu = tk.Menu(menubar, tearoff=0)
-        filemenu.add_command(label="Open Folder...", command=self._open_folder_clicked, accelerator="Ctrl+O")
-        filemenu.add_separator()
-        filemenu.add_command(label="Quit", command=self._on_close)
-        menubar.add_cascade(label="File", menu=filemenu)
+        self.filemenu = tk.Menu(menubar, tearoff=0)
+        self.filemenu.add_command(label="Open Folder...", command=self._open_folder_clicked,
+                                   accelerator="Ctrl+O")
+        self.filemenu.add_separator()
+        self.filemenu.add_command(label="Export Data...", command=self._export_data_clicked, state="disabled")
+        self.filemenu.add_separator()
+        self.filemenu.add_command(label="Quit", command=self._on_close)
+        menubar.add_cascade(label="File", menu=self.filemenu)
 
         self.viewmenu = tk.Menu(menubar, tearoff=0)
         self.viewmenu.add_command(label="Show Log", command=self._show_log)
@@ -189,30 +204,39 @@ class CellCountsApp(tk.Tk):
     # Startup: credentials, then a folder
     # ------------------------------------------------------------------ #
     def _startup(self) -> None:
-        credentials = LoginDialog(self).result
-        if credentials is None:
+        login_result = LoginDialog(self).result
+        if login_result is None:
             self.destroy()
             return
-        username, password = credentials
+        username, password, reopen_last = login_result
         self.client = ApiClient(self.server_url, username, password)
-        self._open_folder_clicked()
+
+        last_folder = state.get_last_folder()
+        if reopen_last and last_folder is not None and last_folder.is_dir():
+            self._open_folder(last_folder)
+        else:
+            self._open_folder_clicked()
 
     def _open_folder_clicked(self) -> None:
         chosen = filedialog.askdirectory(title="Select the folder of TIFF images to review")
         if not chosen:
             return
+        self._open_folder(Path(chosen))
 
+    def _open_folder(self, folder: Path) -> None:
         if self.review_panel is not None:
             self.review_panel.close()
             self.review_panel.destroy()
             self.review_panel = None
             self.viewmenu.entryconfig("Show Review", state="disabled")
+            self.filemenu.entryconfig("Export Data...", state="disabled")
         self.log_text.configure(state="normal")
         self.log_text.delete("1.0", "end")
         self.log_text.configure(state="disabled")
 
-        self.folder = Path(chosen)
+        self.folder = folder
         self._log(f"Folder: {self.folder}")
+        state.save_last_folder(self.folder)
 
         # Manifest load + folder scan are both cheap (one small JSON read, one
         # rglob + filename-regex pass — no hashing, no per-image I/O), so we do
@@ -246,7 +270,12 @@ class CellCountsApp(tk.Tk):
         self.review_panel = ReviewPanel(self.content_frame, self.folder, manifest, self.statusbar,
                                          recognized, queue)
         self.viewmenu.entryconfig("Show Review", state="normal")
+        self.filemenu.entryconfig("Export Data...", state="normal")
         self._show_review()
+
+    def _export_data_clicked(self) -> None:
+        if self.review_panel is not None:
+            self.review_panel.export_data()
 
     # ------------------------------------------------------------------ #
     # Background worker: hash, skip up-to-date, then drain the queue
