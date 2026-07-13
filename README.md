@@ -4,7 +4,7 @@ Cell/nuclei segmentation and coexpression review for fluorescence microscopy TIF
 split into a client and a server:
 
 - **`server/`** — a GPU compute endpoint (Cellpose-SAM) reachable over the internet
-  at `research.matthewbolding.com`. Ingests TIFFs, returns detected cells as JSON.
+  at a domain you control. Ingests TIFFs, returns detected cells as JSON.
   See **[SERVER.md](SERVER.md)** for install/deploy.
 - **`client/`** — the reviewer's application. You pick a folder of images; it hashes
   every file, skips anything already processed, and sends the rest to the server.
@@ -25,11 +25,9 @@ detected cell (polygon outline, status, source). Re-opening the same folder only
 (re)processes files that are new or whose contents changed since the hash was last
 recorded; everything else is read straight from the manifest.
 
-## Status
+## Authors
 
-Phase 1 (this state of the repo) covers the end-to-end pipeline: folder scan →
-hash-based skip → chunked upload → server-side segmentation → manifest. It replaces
-the old `count_cells.py` for all three channels. There is no review/editing UI yet —
-manual draw/delete, mask-vs-outline, per-cell color, coexpression visualization,
-CSV/XLSX export, and crop-based rescan are planned as later phases on top of this
-manifest format.
+Built by Matthew Bolding with [Claude](https://claude.ai) (Anthropic).
+
+Segmentation runs on [Cellpose-SAM](https://github.com/MouseLand/cellpose) — see
+that repo for citation details if you use this tool's output in published work.

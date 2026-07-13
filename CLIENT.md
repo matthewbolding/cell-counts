@@ -10,13 +10,11 @@ to run it.
 1. Install Python from <https://www.python.org/downloads/> if it isn't already on
    your machine. On the installer's first screen, click "Install Now" — that
    installs for your user only (no admin needed) and includes Tkinter by default.
-2. Install the one extra package this app needs:
+2. Install the packages this app needs (no virtual environment needed — this puts
+   them in your user site-packages):
 
-   ```
-   pip install --user -r client/requirements.txt
-   ```
-
-   (No virtual environment needed — this puts it in your user site-packages.)
+   - **Windows**: `py -m pip install --user -r client/requirements.txt`
+   - **macOS**: `python3 -m pip install --user -r client/requirements.txt`
 
 ## Running it
 
@@ -24,12 +22,14 @@ to run it.
 python client/app.py
 ```
 
-1. **Sign in.** One dialog asks for both the username and password — this is the
-   single shared login for the compute server; ask whoever set up the server for
-   it. Check **Remember me on this computer** to skip retyping it next time — it's
-   saved to `~/.cellcounts/credentials.json` on your machine only (never part of
-   the repo), readable only by your own account. Leave it unchecked, or uncheck it
-   and sign in again, to forget a previously-remembered login. There's also an
+1. **Sign in.** One dialog asks for the server address (e.g.
+   `https://research.yourdomain.com`), username, and password — ask whoever set up
+   the server for these. The server address you enter is remembered and pre-filled
+   next time. Check **Remember me on this computer** to skip retyping the
+   username/password too — that's saved to `~/.cellcounts/credentials.json` on
+   your machine only (never part of the repo), readable only by your own account.
+   Leave it unchecked, or uncheck it and sign in again, to forget a
+   previously-remembered login. There's also an
    **Open the same folder as last time** checkbox (grayed out until you've opened
    at least one folder) that skips the folder picker below entirely and jumps
    straight back into whichever folder you had open last — handy when you're in
@@ -191,7 +191,8 @@ edits and queue arrangement are saved into.
 
 - **"Authentication failed"** — wrong username/password; re-launch the app to be
   prompted again.
-- **"Could not reach server"** — the server may be down, or `research.matthewbolding.com`
-  unreachable from your network; check with whoever runs the server.
+- **"Could not reach server"** — double-check the server address you entered, or
+  the server itself may be down/unreachable from your network; check with
+  whoever runs it.
 - The app only writes your password to disk if you check "Remember me on this
   computer"; leave it unchecked and you'll be asked again every launch.

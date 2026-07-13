@@ -33,43 +33,51 @@ from processing_queue import QUEUE_STATE_NAME, ProcessingQueue, QueueItem, load_
 from review import ReviewPanel
 from statusbar import StatusBar
 
-DEFAULT_SERVER_URL = os.environ.get("CELLCOUNTS_SERVER_URL", "https://research.matthewbolding.com")
+DEFAULT_SERVER_URL = os.environ.get("CELLCOUNTS_SERVER_URL", "")
 
 
 class LoginDialog(tk.Toplevel):
-    """One modal form for username + password, instead of two sequential
-    simpledialog popups — asking for both fields separately felt clunky."""
+    """One modal form for the server endpoint, username, and password, instead of
+    several sequential simpledialog popups — asking for each separately felt
+    clunky."""
 
     def __init__(self, parent):
         super().__init__(parent)
         self.title("Cell Counts — Sign in")
         self.resizable(False, False)
-        self.result: tuple[str, str, bool] | None = None
+        self.result: tuple[str, str, str, bool] | None = None
 
         form = ttk.Frame(self, padding=16)
         form.pack(fill="both", expand=True)
 
-        ttk.Label(form, text="Username:").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        self.username_entry = ttk.Entry(form, width=28)
-        self.username_entry.grid(row=0, column=1, pady=(0, 8))
+        ttk.Label(form, text="Server:").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.server_entry = ttk.Entry(form, width=32)
+        self.server_entry.grid(row=0, column=1, pady=(0, 8))
+        default_server = state.get_last_server_url() or DEFAULT_SERVER_URL
+        if default_server:
+            self.server_entry.insert(0, default_server)
 
-        ttk.Label(form, text="Password:").grid(row=1, column=0, sticky="w")
-        self.password_entry = ttk.Entry(form, width=28, show="*")
-        self.password_entry.grid(row=1, column=1)
+        ttk.Label(form, text="Username:").grid(row=1, column=0, sticky="w", pady=(0, 8))
+        self.username_entry = ttk.Entry(form, width=32)
+        self.username_entry.grid(row=1, column=1, pady=(0, 8))
+
+        ttk.Label(form, text="Password:").grid(row=2, column=0, sticky="w")
+        self.password_entry = ttk.Entry(form, width=32, show="*")
+        self.password_entry.grid(row=2, column=1)
 
         self.remember_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(form, text="Remember me on this computer", variable=self.remember_var).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+            row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         last_folder = state.get_last_folder()
         self.reopen_var = tk.BooleanVar(value=state.get_reopen_last_folder() if last_folder else False)
         reopen_cb = ttk.Checkbutton(form, text="Open the same folder as last time", variable=self.reopen_var)
         if last_folder is None:
             reopen_cb.configure(state="disabled")
-        reopen_cb.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        reopen_cb.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
         if last_folder is not None:
             ttk.Label(form, text=str(last_folder), foreground="#666").grid(
-                row=4, column=0, columnspan=2, sticky="w", padx=(20, 0))
+                row=5, column=0, columnspan=2, sticky="w", padx=(20, 0))
 
         remembered = credentials.load()
         if remembered is not None:
@@ -79,7 +87,7 @@ class LoginDialog(tk.Toplevel):
             self.remember_var.set(True)
 
         buttons = ttk.Frame(form)
-        buttons.grid(row=5, column=0, columnspan=2, pady=(16, 0), sticky="e")
+        buttons.grid(row=6, column=0, columnspan=2, pady=(16, 0), sticky="e")
         ttk.Button(buttons, text="Cancel", command=self._on_cancel).pack(side="right", padx=(6, 0))
         ttk.Button(buttons, text="Sign In", command=self._on_submit, default="active").pack(side="right")
 
@@ -88,22 +96,30 @@ class LoginDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
         self.transient(parent)
-        (self.password_entry if remembered else self.username_entry).focus_set()
+        if not default_server:
+            initial_focus = self.server_entry
+        elif remembered:
+            initial_focus = self.password_entry
+        else:
+            initial_focus = self.username_entry
+        initial_focus.focus_set()
         self.update_idletasks()
         self.grab_set()
         self.wait_window(self)
 
     def _on_submit(self) -> None:
+        server_url = self.server_entry.get().strip().rstrip("/")
         username = self.username_entry.get().strip()
         password = self.password_entry.get()
-        if not username or not password:
+        if not server_url or not username or not password:
             return
         if self.remember_var.get():
             credentials.save(username, password)
         else:
             credentials.clear()
+        state.save_last_server_url(server_url)
         state.save_reopen_last_folder(self.reopen_var.get())
-        self.result = (username, password, self.reopen_var.get())
+        self.result = (server_url, username, password, self.reopen_var.get())
         self.destroy()
 
     def _on_cancel(self) -> None:
@@ -112,13 +128,13 @@ class LoginDialog(tk.Toplevel):
 
 
 class CellCountsApp(tk.Tk):
-    def __init__(self, server_url: str = DEFAULT_SERVER_URL):
+    def __init__(self):
         super().__init__()
         self.title("Cell Counts")
         self.geometry("1100x700")
         self.minsize(800, 500)
 
-        self.server_url = server_url
+        self.server_url: str | None = None
         self.client: ApiClient | None = None
         self.folder: Path | None = None
         self.manifest: Manifest | None = None
@@ -208,7 +224,8 @@ class CellCountsApp(tk.Tk):
         if login_result is None:
             self.destroy()
             return
-        username, password, reopen_last = login_result
+        server_url, username, password, reopen_last = login_result
+        self.server_url = server_url
         self.client = ApiClient(self.server_url, username, password)
 
         last_folder = state.get_last_folder()

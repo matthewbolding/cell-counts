@@ -84,3 +84,16 @@ def save_reopen_last_folder(value: bool) -> None:
     all_state = _load_all()
     all_state[_REOPEN_LAST_FOLDER_KEY] = value
     _save_all(all_state)
+
+
+_LAST_SERVER_URL_KEY = "_last_server_url"
+
+
+def get_last_server_url() -> str:
+    return _load_all().get(_LAST_SERVER_URL_KEY, "")
+
+
+def save_last_server_url(url: str) -> None:
+    all_state = _load_all()
+    all_state[_LAST_SERVER_URL_KEY] = url
+    _save_all(all_state)
