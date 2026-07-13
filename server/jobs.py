@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import shutil
 import sqlite3
 import threading
 import time
@@ -33,6 +34,7 @@ import uploads
 log = logging.getLogger("jobs")
 
 DB_PATH = Path("data/jobs.sqlite3")
+JOB_FILES_ROOT = Path("data/jobs")
 
 _model = None
 _queue: "queue.Queue[str]" = queue.Queue()
@@ -91,13 +93,29 @@ def model_loaded() -> bool:
 
 
 def enqueue(final_path: Path, filename: str, params: dict[str, Any] | None = None) -> str:
+    """Give this job its own private copy of the uploaded file, under a
+    job_id-keyed directory, rather than pointing at the shared upload's
+    `final_path` directly. `upload_id` (and therefore `final_path`) is
+    deterministic from (filename, sha256) — if the same file gets submitted more
+    than once before the first submission's job has run (e.g. the client
+    resubmits after being closed mid-processing), both submissions would
+    otherwise share one physical file, and whichever job finished first would
+    delete it out from under the other (`uploads.cleanup_final`) — a real
+    `FileNotFoundError` observed in production. Each job now only ever deletes
+    its own copy.
+    """
     job_id = uuid.uuid4().hex
+    job_dir = JOB_FILES_ROOT / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    job_path = job_dir / filename
+    shutil.copyfile(final_path, job_path)
+
     now = time.time()
     with _db_lock:
         _conn.execute(
             "INSERT INTO jobs (id, status, filename, final_path, params, progress, result, error, "
             "created_at, updated_at) VALUES (?, 'queued', ?, ?, ?, NULL, NULL, NULL, ?, ?)",
-            (job_id, filename, str(final_path), json.dumps(params or {}), now, now),
+            (job_id, filename, str(job_path), json.dumps(params or {}), now, now),
         )
         _conn.commit()
     _queue.put(job_id)

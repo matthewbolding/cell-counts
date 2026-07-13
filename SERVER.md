@@ -105,12 +105,20 @@ address when signing into the client.
 
 ## Operating notes
 
-- `docker compose logs -f` to tail; `docker compose restart` to bounce the server
-  (in-flight jobs will error out and the client will re-upload on its next run —
-  job status is persisted in SQLite, so a poll never just 404s into the void).
+- `docker compose logs -f` to tail; `docker compose restart` to bounce the server.
+  In-flight jobs get marked errored on the next startup (job status is persisted
+  in SQLite and survives the restart, so this is a real status update, not a
+  404) and the client retries them automatically. If the job history itself is
+  gone (e.g. `server/data/` was reset) the client falls back to a fresh upload
+  instead of failing outright.
 - `--workers 1` in the Dockerfile's `CMD` is required — a second uvicorn worker
   would load a second Cellpose model and likely exhaust the GPU's VRAM.
-- Uploaded files are staged/reassembled under `server/data/` (gitignored, bind-mounted
-  into the container) and deleted once their segmentation job finishes; abandoned
-  uploads older than 24h are swept automatically.
+- Uploaded files are staged/reassembled under `server/data/incoming/`
+  (gitignored, bind-mounted into the container); each queued job gets its own
+  private copy under `server/data/jobs/<job_id>/` so two jobs can never step on
+  the same file (this matters when the same file gets submitted more than once
+  before the first submission finishes — it used to be possible for one job to
+  delete the file the other was still using). Both are cleaned up as soon as
+  they're no longer needed; abandoned uploads older than 24h are swept
+  automatically.
 - Job history lives in `server/data/jobs.sqlite3`.

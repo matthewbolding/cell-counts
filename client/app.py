@@ -140,6 +140,12 @@ class CellCountsApp(tk.Tk):
         self.manifest: Manifest | None = None
         self.queue: ProcessingQueue | None = None
         self.review_panel: ReviewPanel | None = None
+        # Folders with an active background processing thread — guards against
+        # starting a second one for the same folder (e.g. re-picking it, or
+        # "open the same folder as last time" racing an already-running pass),
+        # which would otherwise let two threads both decide the same file
+        # "needs processing" before either records anything.
+        self._active_processing_folders: set[Path] = set()
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -270,7 +276,12 @@ class CellCountsApp(tk.Tk):
             for p in skipped:
                 self.ui_log(f"  - {p.name}")
 
-        threading.Thread(target=self._process_folder, args=(self.folder, manifest, recognized, self.queue),
+        if folder in self._active_processing_folders:
+            self.ui_log("This folder is already being processed in the background from an earlier "
+                        "open — not starting a second pass.")
+            return
+        self._active_processing_folders.add(folder)
+        threading.Thread(target=self._process_folder, args=(folder, manifest, recognized, self.queue),
                           daemon=True).start()
 
     def _on_close(self) -> None:
@@ -299,40 +310,53 @@ class CellCountsApp(tk.Tk):
     # ------------------------------------------------------------------ #
     def _process_folder(self, folder: Path, manifest: Manifest, recognized: list[ScannedFile],
                          queue: ProcessingQueue) -> None:
+        try:
+            self._run_processing(folder, manifest, recognized, queue)
+        finally:
+            self._active_processing_folders.discard(folder)
+
+    def _run_processing(self, folder: Path, manifest: Manifest, recognized: list[ScannedFile],
+                         queue: ProcessingQueue) -> None:
         if not recognized:
             self.ui_status("No {PREFIX}_{CCK,CHR,SNAP}.tif files found in this folder.")
             self.ui_light("idle")
             return
 
         self.ui_log(f"Found {len(recognized)} recognized image(s); hashing...")
-        to_process = []
+        to_process: list[QueueItem] = []
+        resumed: list[tuple[ScannedFile, str, str]] = []  # already submitted last session, not yet done
         for i, sf in enumerate(recognized, 1):
             self.ui_status(f"Hashing {sf.path.name} ({i}/{len(recognized)})")
             file_hash = hash_file(sf.path)
-            if manifest.needs_processing(sf.path.name, file_hash):
+            pending_job_id = manifest.pending_job(sf.path.name, file_hash)
+            if pending_job_id:
+                resumed.append((sf, file_hash, pending_job_id))
+            elif manifest.needs_processing(sf.path.name, file_hash):
                 to_process.append(QueueItem(sf=sf, file_hash=file_hash))
 
-        up_to_date = len(recognized) - len(to_process)
-        self.ui_log(f"{up_to_date} file(s) already up to date; {len(to_process)} need processing.")
+        up_to_date = len(recognized) - len(to_process) - len(resumed)
+        resumed_note = f"; {len(resumed)} resuming from a previous session" if resumed else ""
+        self.ui_log(f"{up_to_date} file(s) already up to date; {len(to_process)} need processing{resumed_note}.")
 
-        if not to_process:
+        if not to_process and not resumed:
             self.ui_status("All images already processed.")
             self.ui_light("idle")
             return
 
-        # Restore a previously-saved queue order/paused-state for this folder, if
-        # any — the hash scan above has no memory of how the user last arranged
-        # the queue, so without this every relaunch would reset back to plain
-        # scan order. Files not mentioned in the saved order (new since last time)
-        # sort after everything that was, in their natural scan order.
-        persisted = load_persisted_order(queue.persist_path) if queue.persist_path else None
-        if persisted:
-            order_index = {fn: i for i, fn in enumerate(persisted.get("order", []))}
-            to_process.sort(key=lambda item: order_index.get(item.filename, len(order_index)))
-            if not persisted.get("running", True):
-                queue.stop()
-
-        queue.enqueue(to_process)
+        if to_process:
+            # Restore a previously-saved queue order/paused-state for this
+            # folder, if any — the hash scan above has no memory of how the
+            # user last arranged the queue, so without this every relaunch
+            # would reset back to plain scan order. Files not mentioned in the
+            # saved order (new since last time) sort after everything that
+            # was, in their natural scan order.
+            persisted = load_persisted_order(queue.persist_path) if queue.persist_path else None
+            if persisted:
+                order_index = {fn: i for i, fn in enumerate(persisted.get("order", []))}
+                to_process.sort(key=lambda item: order_index.get(item.filename, len(order_index)))
+                if not persisted.get("running", True):
+                    queue.stop()
+            queue.enqueue(to_process)
 
         self.ui_light("connecting")
         self.ui_status(f"Connecting to {self.server_url}...")
@@ -348,10 +372,27 @@ class CellCountsApp(tk.Tk):
         self.ui_log(f"Connected to {self.server_url} "
                      f"(gpu={health.get('gpu')}, model_loaded={health.get('model_loaded')}).")
 
+        # Phase 1: get everything durably queued server-side first, uploading
+        # one file at a time but never waiting for a job to finish before
+        # starting the next upload. Each file's job_id is saved to the
+        # manifest the moment it's obtained — from that instant on, the file
+        # is the server's problem: closing this app (or it crashing) doesn't
+        # stop or lose the segmentation, and next launch resumes polling
+        # instead of re-uploading. Re-uploading an already-outstanding file
+        # used to create two jobs sharing one server-side file, where
+        # whichever finished first deleted it out from under the other
+        # (fixed server-side too, but no reason to do it needlessly).
+        if resumed:
+            self.ui_log(f"Resuming {len(resumed)} job(s) already in progress from a previous session.")
+        pending_polls: list[tuple[ScannedFile, str, str]] = list(resumed)
+
         n_ok = n_err = 0
+        uploaded = 0
+        total_upload = len(to_process)
         while (item := queue.pop_next()) is not None:
             sf, file_hash = item.sf, item.file_hash
-            label = f"{sf.path.name} ({n_ok + n_err + 1}/{len(to_process)})"
+            uploaded += 1
+            label = f"{sf.path.name} ({uploaded}/{total_upload})"
             self.ui_status(f"Uploading {label}...")
             self.ui_light("processing")
             try:
@@ -360,11 +401,24 @@ class CellCountsApp(tk.Tk):
                     on_chunk=lambda done, total, label=label: self.ui_status(
                         f"Uploading {label}: chunk {done}/{total}"),
                 )
-                self.ui_status(f"Waiting for server to process {label}...")
-                result = self.client.poll_job(
-                    job_id,
-                    on_tick=lambda job, label=label: self.ui_status(f"{job['status'].title()}: {label}"),
-                )
+                manifest.record_submitted(sf.path.name, sf.prefix, sf.channel, file_hash, job_id)
+                pending_polls.append((sf, file_hash, job_id))
+            except ApiError as exc:
+                manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, str(exc))
+                self.ui_log(f"ERROR uploading {sf.path.name}: {exc}")
+                n_err += 1
+            finally:
+                queue.complete(item)
+
+        if pending_polls:
+            self.ui_log(f"{len(pending_polls)} file(s) queued on the server — segmentation continues "
+                         "even if this app is closed now.")
+
+        # Phase 2: wait for results. Nothing from here on is needed for the
+        # server to keep working — this is purely pulling results back down.
+        for sf, file_hash, job_id in pending_polls:
+            try:
+                result = self._poll_with_resubmit(sf, file_hash, job_id)
                 manifest.record_result(
                     sf.path.name, sf.prefix, sf.channel, file_hash,
                     result["width"], result["height"], result["params"], result["cells"],
@@ -377,12 +431,29 @@ class CellCountsApp(tk.Tk):
                 manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, str(exc))
                 self.ui_log(f"ERROR processing {sf.path.name}: {exc}")
                 n_err += 1
-            finally:
-                queue.complete(item)
 
         self.ui_light("connected" if n_err == 0 else "error")
         self.ui_status(f"Done. {n_ok} processed, {n_err} failed, {up_to_date} already up to date.")
         self.ui_log(f"Finished: {n_ok} processed, {n_err} failed.")
+
+    def _poll_with_resubmit(self, sf: ScannedFile, file_hash: str, job_id: str) -> dict:
+        """Poll `job_id`; if the server has no record of it (status_code 404 —
+        e.g. it was redeployed/restarted since the job was submitted and its
+        SQLite job history didn't carry over), fall back to a fresh upload once
+        rather than failing the file outright."""
+        label = sf.path.name
+        self.ui_status(f"Waiting for server to process {label}...")
+        try:
+            return self.client.poll_job(
+                job_id, on_tick=lambda job, label=label: self.ui_status(f"{job['status'].title()}: {label}"))
+        except ApiError as exc:
+            if exc.status_code != 404:
+                raise
+            self.ui_log(f"{label}: server no longer knows this job (likely restarted) — re-uploading.")
+            new_job_id = self.client.upload_file(sf.path, file_hash)
+            self.ui_status(f"Waiting for server to process {label}...")
+            return self.client.poll_job(
+                new_job_id, on_tick=lambda job, label=label: self.ui_status(f"{job['status'].title()}: {label}"))
 
 
 def main(argv=None) -> int:

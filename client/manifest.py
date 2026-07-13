@@ -126,7 +126,34 @@ class Manifest:
         entry = self.data["images"].get(filename)
         if entry is None:
             return True
-        return entry.get("hash") != current_hash or entry.get("status") != "done"
+        if entry.get("hash") != current_hash:
+            return True  # content changed since it was submitted/completed -> must resubmit
+        # "processing" means a job is already outstanding for this exact content
+        # (see record_submitted) -- resume polling it, don't submit a second one.
+        return entry.get("status") not in ("done", "processing")
+
+    def pending_job(self, filename: str, current_hash: str) -> str | None:
+        """job_id of an already-outstanding submission for this exact content, if
+        any -- lets a resumed session poll it instead of re-uploading. Returns
+        None once record_result/record_error overwrites the entry (status is no
+        longer "processing") or if the file changed since it was submitted."""
+        entry = self.data["images"].get(filename)
+        if entry is None or entry.get("hash") != current_hash or entry.get("status") != "processing":
+            return None
+        return entry.get("job_id")
+
+    def record_submitted(self, filename: str, prefix: str, channel: str, file_hash: str, job_id: str) -> None:
+        """Written immediately after a successful upload, before waiting for the
+        job to finish — so a client that closes (or crashes) between now and the
+        job actually completing resumes polling `job_id` next launch instead of
+        re-uploading and creating a duplicate job."""
+        self.data["images"][filename] = {
+            "prefix": prefix, "channel": channel, "hash": file_hash,
+            "width": None, "height": None,
+            "status": "processing", "processed_at": None,
+            "params": None, "error": None, "job_id": job_id,
+        }
+        self.save()
 
     def record_result(self, filename: str, prefix: str, channel: str, file_hash: str,
                        width: int, height: int, params: dict, cells: list[dict]) -> None:

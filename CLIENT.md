@@ -41,9 +41,12 @@ python client/app.py
    to finish before you can look around. In the background, the app hashes every
    recognized image and skips anything already processed (tracked in a
    `cellcounts.json` file it creates in that folder — don't delete it, it's what
-   makes re-opening the same folder fast); anything new or changed gets uploaded to
-   the server and segmented while you browse. See "Reviewing" below for the
-   readiness dots that show you what's done, in progress, or still pending.
+   makes re-opening the same folder fast); anything new or changed gets uploaded
+   first, then segmented. Once a file finishes uploading it's on the server for
+   good — closing the app doesn't stop or lose it, segmentation keeps running
+   there regardless, and reopening the folder later just checks in on results
+   instead of uploading anything twice. See "Reviewing" below for the readiness
+   dots that show you what's done, in progress, or still pending.
 
 The bottom of the window has two things to watch:
 
@@ -94,19 +97,23 @@ Review** to come back).
   population these are measured against), and the coexpression rate. This tab is
   view-only — Review/Draw/Delete are disabled while it's open, since editing
   always happens on one real channel, never on this derived view.
-- **Queue** (left, bottom) — the files still waiting to be uploaded/segmented, in
-  the order they'll run, styled the same as the Samples list above it. Click to
-  select one; Ctrl-click to add/remove individual files from the selection;
-  Shift-click to select a whole range — the standard paradigm. The row currently
-  being uploaded/segmented is tinted amber rather than labeled — it also can't be
+- **Queue** (left, bottom) — the files still waiting to be *uploaded*, in the
+  order they'll go, styled the same as the Samples list above it. This is
+  upload order, not segmentation order — a file drops off this list as soon as
+  it's finished uploading, even though it may still take a while to actually
+  segment on the server (watch the readiness dots for that). Click to select
+  one; Ctrl-click to add/remove individual files from the selection;
+  Shift-click to select a whole range — the standard paradigm. The row
+  currently uploading is tinted amber rather than labeled — it also can't be
   reordered or reprioritized past. Four buttons reorder the selection: **▲** (up
   one), **▼** (down one), **▲▲** (send to top), **▼▼** (send to bottom). A
   multi-selection moves as a block — the items you selected keep their order
-  relative to each other, they just all shift together. **Start/Stop** pauses and
-  resumes the queue; Stop finishes whatever file is already in flight
-  before pausing (there's no way to cancel a file mid-segmentation), so don't
-  expect it to stop instantly. When there's nothing queued or in flight, the
-  button reads **Inactive** and is grayed out — there's nothing for it to start or
+  relative to each other, they just all shift together. **Start/Stop** pauses
+  and resumes uploading; Stop finishes whatever file is already mid-upload
+  before pausing. It has no effect on files already uploaded — those keep
+  segmenting on the server regardless. When there's nothing queued or
+  uploading, the button reads **Inactive** and is grayed out — there's nothing
+  for it to start or
   stop. Your queue order and paused/running state are saved per folder and
   restored next time you open it, same as everything else below.
 - **Mode** (top left: Review / Draw / Delete / Rescan):

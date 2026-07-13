@@ -689,15 +689,28 @@ class ReviewPanel(ttk.Frame):
                 dot.configure(bg=bg)
 
     def _channel_status(self, prefix: str, channel: str) -> str:
-        """"not_ready" | "processing" | "ready" — drives a sidebar dot's color."""
+        """"not_ready" | "processing" | "ready" — drives a sidebar dot's color.
+
+        Uploads now happen up front and results are polled independently of the
+        visible Queue panel (see app.py's two-phase _run_processing), so a file
+        can be genuinely "processing" — uploaded, job outstanding server-side —
+        without `self.queue` knowing about it at all (freshly submitted this
+        session, or resumed from a previous one). The manifest's own `status`
+        field is the authoritative source for that; the queue check just makes
+        the dot flip to blue the instant an upload starts, without waiting for
+        the poll loop to persist anything.
+        """
         filename = self.samples.get(prefix, {}).get(channel)
         if filename is None:
             return "not_ready"
         if self.queue.is_processing(filename):
             return "processing"
         info = self.manifest.data["images"].get(filename)
-        if info and info.get("status") == "done":
-            return "ready"
+        if info:
+            if info.get("status") == "done":
+                return "ready"
+            if info.get("status") == "processing":
+                return "processing"
         return "not_ready"
 
     def _refresh_sample_dots(self) -> None:

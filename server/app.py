@@ -122,6 +122,10 @@ def complete_upload(upload_id: str, req: CompleteUploadRequest = CompleteUploadR
     except uploads.UploadError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     job_id = jobs.enqueue(final_path, final_path.name, req.params)
+    # The job made its own private copy — free the shared upload immediately
+    # rather than waiting for the job to run (which may be a while if the queue
+    # is backed up).
+    uploads.cleanup_final(final_path)
     return {"job_id": job_id}
 
 

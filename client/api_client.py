@@ -28,7 +28,9 @@ POLL_SLOW_INTERVAL = 8
 
 
 class ApiError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ApiClient:
@@ -43,13 +45,13 @@ class ApiClient:
 
     def _raise_for_status(self, resp: requests.Response) -> None:
         if resp.status_code == 401:
-            raise ApiError("Authentication failed — check username/password.")
+            raise ApiError("Authentication failed — check username/password.", status_code=401)
         if not resp.ok:
             try:
                 detail = resp.json().get("detail")
             except (ValueError, AttributeError):
                 detail = resp.text
-            raise ApiError(f"Server error {resp.status_code}: {detail}")
+            raise ApiError(f"Server error {resp.status_code}: {detail}", status_code=resp.status_code)
 
     def health(self) -> dict:
         resp = self.session.get(self._url("/health"), timeout=self.timeout)
