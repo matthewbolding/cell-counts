@@ -9,6 +9,7 @@ __pycache__/
 *.csv
 *.json
 *.xlsx
+*.bak
 
 server/data/
 .env

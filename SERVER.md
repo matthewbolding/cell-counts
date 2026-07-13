@@ -3,13 +3,13 @@
 The server is a FastAPI app that loads one Cellpose-SAM model on GPU at startup and
 serves it over a small chunked-upload + job-polling HTTP API (see `server/app.py`
 for the full endpoint list). It's meant to run in Docker on a Linux box with an
-NVIDIA GPU — in this deployment, `ubuntu-powerhouse`.
+NVIDIA GPU.
 
 ## 1. Install the NVIDIA driver (one-time, manual — needs sudo)
 
 ```bash
-ssh matthewbolding@ubuntu-powerhouse
-ubuntu-drivers devices          # see what it recommends for the RTX 3080 Ti
+ssh <user>@<gpu-host>
+ubuntu-drivers devices          # see what it recommends for your GPU
 sudo ubuntu-drivers autoinstall # or: sudo apt install nvidia-driver-<version>
 sudo reboot
 ```
@@ -17,12 +17,12 @@ sudo reboot
 After the reboot:
 
 ```bash
-nvidia-smi   # must show the RTX 3080 Ti and a driver version — stop here and fix if not
+nvidia-smi   # must show your GPU and a driver version — stop here and fix if not
 ```
 
 ## 2. Install the NVIDIA container toolkit (one-time, manual — needs sudo)
 
-Docker is already installed on `ubuntu-powerhouse`, but it needs the toolkit to pass
+Docker must already be installed on `<gpu-host>`, but it needs the toolkit to pass
 the GPU through to a container:
 
 ```bash
@@ -82,10 +82,10 @@ The DNS record for `research.matthewbolding.com` already exists and is proxied
 through Cloudflare (free tier). In Nginx Proxy Manager, add/update the proxy host:
 
 - **Domain**: `research.matthewbolding.com`
-- **Forward to**: `<ubuntu-powerhouse's address reachable from the NPM host>` —
-  port **8000**. (NPM runs on a separate host from `ubuntu-powerhouse`; use
-  whichever address that host can actually reach it by — LAN IP or the Tailscale
-  address `100.106.181.10` seen during setup — pick based on your network layout.)
+- **Forward to**: `<gpu-host's address reachable from the NPM host>` — port
+  **8000**. (NPM runs on a separate host from `<gpu-host>`; use whichever address
+  that host can actually reach it by — LAN IP or a VPN/Tailscale address — pick
+  based on your network layout.)
 - **Scheme**: `http` (NPM/Cloudflare terminate TLS in front of this)
 - Force SSL, HTTP/2 support: on.
 - Cloudflare: orange-cloud (proxied) the DNS record so the free-tier proxy sits in

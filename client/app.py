@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-app.py — Cell Counts client entry point (Phase 1: orchestration only).
+app.py — Cell Counts client entry point.
 
-On launch: prompts for the server credentials, then a folder to review (same
-folder-picker flow as the old cell_review.py). Scans the folder for
-`{PREFIX}_{CCK,CHR,SNAP}.tif` files, hashes each one, and compares against
-`cellcounts.json` in that folder — only new or changed files get uploaded to the
-compute server (see SERVER.md) for segmentation; everything else is skipped. Results
-are merged into `cellcounts.json` as each job completes, so progress survives a
-mid-run interruption.
-
-There is no review/editing UI yet — that's Phase 2, built on top of the manifest
-this phase produces. This alone replaces the old count_cells.py end to end for all
-three channels.
+On launch: prompts for the server credentials (one combined dialog), then a folder
+to review. Scans the folder for `{PREFIX}_{CCK,CHR,SNAP}.tif` files and immediately
+shows the review panel (review.py) — browse samples/channels, toggle mask/outline,
+draw/delete cells, recolor channels — rather than making the user wait behind a
+processing log. Hashing (compared against `cellcounts.json`) and upload/segmentation
+of anything new or changed then run on a background thread via a `ProcessingQueue`
+(processing_queue.py), which the review panel polls to show live per-channel
+readiness dots and a reorderable pending-work list. The log stays reachable via
+View > Show Log for diagnosing upload issues.
 
 Network I/O runs on a background thread; all Tk widget updates from that thread are
 marshalled onto the main thread via `after()`.
@@ -25,27 +23,98 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
+import credentials
 from api_client import ApiClient, ApiError
-from manifest import Manifest, hash_file, scan_folder
+from manifest import Manifest, ScannedFile, hash_file, scan_folder
+from processing_queue import QUEUE_STATE_NAME, ProcessingQueue, QueueItem, load_persisted_order
+from review import ReviewPanel
 from statusbar import StatusBar
 
 DEFAULT_SERVER_URL = os.environ.get("CELLCOUNTS_SERVER_URL", "https://research.matthewbolding.com")
+
+
+class LoginDialog(tk.Toplevel):
+    """One modal form for username + password, instead of two sequential
+    simpledialog popups — asking for both fields separately felt clunky."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Cell Counts — Sign in")
+        self.resizable(False, False)
+        self.result: tuple[str, str] | None = None
+
+        form = ttk.Frame(self, padding=16)
+        form.pack(fill="both", expand=True)
+
+        ttk.Label(form, text="Username:").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        self.username_entry = ttk.Entry(form, width=28)
+        self.username_entry.grid(row=0, column=1, pady=(0, 8))
+
+        ttk.Label(form, text="Password:").grid(row=1, column=0, sticky="w")
+        self.password_entry = ttk.Entry(form, width=28, show="*")
+        self.password_entry.grid(row=1, column=1)
+
+        self.remember_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(form, text="Remember me on this computer", variable=self.remember_var).grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        remembered = credentials.load()
+        if remembered is not None:
+            username, password = remembered
+            self.username_entry.insert(0, username)
+            self.password_entry.insert(0, password)
+            self.remember_var.set(True)
+
+        buttons = ttk.Frame(form)
+        buttons.grid(row=3, column=0, columnspan=2, pady=(16, 0), sticky="e")
+        ttk.Button(buttons, text="Cancel", command=self._on_cancel).pack(side="right", padx=(6, 0))
+        ttk.Button(buttons, text="Sign In", command=self._on_submit, default="active").pack(side="right")
+
+        self.bind("<Return>", lambda e: self._on_submit())
+        self.bind("<Escape>", lambda e: self._on_cancel())
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        self.transient(parent)
+        (self.password_entry if remembered else self.username_entry).focus_set()
+        self.update_idletasks()
+        self.grab_set()
+        self.wait_window(self)
+
+    def _on_submit(self) -> None:
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get()
+        if not username or not password:
+            return
+        if self.remember_var.get():
+            credentials.save(username, password)
+        else:
+            credentials.clear()
+        self.result = (username, password)
+        self.destroy()
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self.destroy()
 
 
 class CellCountsApp(tk.Tk):
     def __init__(self, server_url: str = DEFAULT_SERVER_URL):
         super().__init__()
         self.title("Cell Counts")
-        self.geometry("900x600")
-        self.minsize(640, 400)
+        self.geometry("1100x700")
+        self.minsize(800, 500)
 
         self.server_url = server_url
         self.client: ApiClient | None = None
         self.folder: Path | None = None
+        self.manifest: Manifest | None = None
+        self.queue: ProcessingQueue | None = None
+        self.review_panel: ReviewPanel | None = None
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(200, self._startup)
 
     # ------------------------------------------------------------------ #
@@ -54,13 +123,16 @@ class CellCountsApp(tk.Tk):
     def _build_ui(self) -> None:
         self._build_menu()
 
-        log_frame = ttk.Frame(self)
-        log_frame.pack(fill="both", expand=True, padx=8, pady=8)
-        self.log_text = tk.Text(log_frame, state="disabled", wrap="word")
-        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.content_frame = ttk.Frame(self)
+        self.content_frame.pack(fill="both", expand=True)
+
+        self.log_frame = ttk.Frame(self.content_frame)
+        self.log_text = tk.Text(self.log_frame, state="disabled", wrap="word")
+        log_scroll = ttk.Scrollbar(self.log_frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=log_scroll.set)
-        self.log_text.pack(side="left", fill="both", expand=True)
-        log_scroll.pack(side="right", fill="y")
+        self.log_text.pack(side="left", fill="both", expand=True, padx=(8, 0), pady=8)
+        log_scroll.pack(side="right", fill="y", pady=8)
+        self.log_frame.pack(fill="both", expand=True)
 
         self.statusbar = StatusBar(self)
         self.statusbar.pack(side="bottom", fill="x")
@@ -70,10 +142,27 @@ class CellCountsApp(tk.Tk):
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="Open Folder...", command=self._open_folder_clicked, accelerator="Ctrl+O")
         filemenu.add_separator()
-        filemenu.add_command(label="Quit", command=self.destroy)
+        filemenu.add_command(label="Quit", command=self._on_close)
         menubar.add_cascade(label="File", menu=filemenu)
+
+        self.viewmenu = tk.Menu(menubar, tearoff=0)
+        self.viewmenu.add_command(label="Show Log", command=self._show_log)
+        self.viewmenu.add_command(label="Show Review", command=self._show_review, state="disabled")
+        menubar.add_cascade(label="View", menu=self.viewmenu)
+
         self.config(menu=menubar)
         self.bind("<Control-o>", lambda e: self._open_folder_clicked())
+
+    def _show_log(self) -> None:
+        if self.review_panel is not None:
+            self.review_panel.pack_forget()
+        self.log_frame.pack(fill="both", expand=True)
+
+    def _show_review(self) -> None:
+        if self.review_panel is None:
+            return
+        self.log_frame.pack_forget()
+        self.review_panel.pack(fill="both", expand=True)
 
     # ------------------------------------------------------------------ #
     # UI-thread-safe helpers (safe to call from the background worker)
@@ -100,14 +189,11 @@ class CellCountsApp(tk.Tk):
     # Startup: credentials, then a folder
     # ------------------------------------------------------------------ #
     def _startup(self) -> None:
-        username = simpledialog.askstring("Cell Counts — Sign in", "Username:", parent=self)
-        if not username:
+        credentials = LoginDialog(self).result
+        if credentials is None:
             self.destroy()
             return
-        password = simpledialog.askstring("Cell Counts — Sign in", "Password:", parent=self, show="*")
-        if password is None:
-            self.destroy()
-            return
+        username, password = credentials
         self.client = ApiClient(self.server_url, username, password)
         self._open_folder_clicked()
 
@@ -115,23 +201,58 @@ class CellCountsApp(tk.Tk):
         chosen = filedialog.askdirectory(title="Select the folder of TIFF images to review")
         if not chosen:
             return
+
+        if self.review_panel is not None:
+            self.review_panel.close()
+            self.review_panel.destroy()
+            self.review_panel = None
+            self.viewmenu.entryconfig("Show Review", state="disabled")
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
+
         self.folder = Path(chosen)
         self._log(f"Folder: {self.folder}")
-        threading.Thread(target=self._process_folder, args=(self.folder,), daemon=True).start()
 
-    # ------------------------------------------------------------------ #
-    # Background worker: hash, skip up-to-date, upload+process the rest
-    # ------------------------------------------------------------------ #
-    def _process_folder(self, folder: Path) -> None:
-        self.ui_status("Scanning folder...")
-        manifest = Manifest(folder)
-        recognized, skipped = scan_folder(folder)
+        # Manifest load + folder scan are both cheap (one small JSON read, one
+        # rglob + filename-regex pass — no hashing, no per-image I/O), so we do
+        # them synchronously and put the review screen up immediately rather than
+        # making the user watch the log while the (much slower) hash/upload/segment
+        # pass runs on a background thread below.
+        manifest = Manifest(self.folder)
+        recognized, skipped = scan_folder(self.folder)
+        self.queue = ProcessingQueue(persist_path=self.folder / QUEUE_STATE_NAME)
+        self._show_review_panel(manifest, recognized, self.queue)
 
         if skipped:
             self.ui_log(f"Skipped {len(skipped)} file(s) with unrecognized names:")
             for p in skipped:
                 self.ui_log(f"  - {p.name}")
 
+        threading.Thread(target=self._process_folder, args=(self.folder, manifest, recognized, self.queue),
+                          daemon=True).start()
+
+    def _on_close(self) -> None:
+        if self.review_panel is not None:
+            self.review_panel.close()
+        self.destroy()
+
+    def _show_review_panel(self, manifest: Manifest, recognized: list[ScannedFile],
+                            queue: ProcessingQueue) -> None:
+        if self.review_panel is not None:
+            self.review_panel.close()
+            self.review_panel.destroy()
+        self.manifest = manifest
+        self.review_panel = ReviewPanel(self.content_frame, self.folder, manifest, self.statusbar,
+                                         recognized, queue)
+        self.viewmenu.entryconfig("Show Review", state="normal")
+        self._show_review()
+
+    # ------------------------------------------------------------------ #
+    # Background worker: hash, skip up-to-date, then drain the queue
+    # ------------------------------------------------------------------ #
+    def _process_folder(self, folder: Path, manifest: Manifest, recognized: list[ScannedFile],
+                         queue: ProcessingQueue) -> None:
         if not recognized:
             self.ui_status("No {PREFIX}_{CCK,CHR,SNAP}.tif files found in this folder.")
             self.ui_light("idle")
@@ -143,7 +264,7 @@ class CellCountsApp(tk.Tk):
             self.ui_status(f"Hashing {sf.path.name} ({i}/{len(recognized)})")
             file_hash = hash_file(sf.path)
             if manifest.needs_processing(sf.path.name, file_hash):
-                to_process.append((sf, file_hash))
+                to_process.append(QueueItem(sf=sf, file_hash=file_hash))
 
         up_to_date = len(recognized) - len(to_process)
         self.ui_log(f"{up_to_date} file(s) already up to date; {len(to_process)} need processing.")
@@ -152,6 +273,20 @@ class CellCountsApp(tk.Tk):
             self.ui_status("All images already processed.")
             self.ui_light("idle")
             return
+
+        # Restore a previously-saved queue order/paused-state for this folder, if
+        # any — the hash scan above has no memory of how the user last arranged
+        # the queue, so without this every relaunch would reset back to plain
+        # scan order. Files not mentioned in the saved order (new since last time)
+        # sort after everything that was, in their natural scan order.
+        persisted = load_persisted_order(queue.persist_path) if queue.persist_path else None
+        if persisted:
+            order_index = {fn: i for i, fn in enumerate(persisted.get("order", []))}
+            to_process.sort(key=lambda item: order_index.get(item.filename, len(order_index)))
+            if not persisted.get("running", True):
+                queue.stop()
+
+        queue.enqueue(to_process)
 
         self.ui_light("connecting")
         self.ui_status(f"Connecting to {self.server_url}...")
@@ -168,8 +303,9 @@ class CellCountsApp(tk.Tk):
                      f"(gpu={health.get('gpu')}, model_loaded={health.get('model_loaded')}).")
 
         n_ok = n_err = 0
-        for i, (sf, file_hash) in enumerate(to_process, 1):
-            label = f"{sf.path.name} ({i}/{len(to_process)})"
+        while (item := queue.pop_next()) is not None:
+            sf, file_hash = item.sf, item.file_hash
+            label = f"{sf.path.name} ({n_ok + n_err + 1}/{len(to_process)})"
             self.ui_status(f"Uploading {label}...")
             self.ui_light("processing")
             try:
@@ -195,6 +331,8 @@ class CellCountsApp(tk.Tk):
                 manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, str(exc))
                 self.ui_log(f"ERROR processing {sf.path.name}: {exc}")
                 n_err += 1
+            finally:
+                queue.complete(item)
 
         self.ui_light("connected" if n_err == 0 else "error")
         self.ui_status(f"Done. {n_ok} processed, {n_err} failed, {up_to_date} already up to date.")

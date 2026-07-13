@@ -3,4 +3,13 @@
 #
 # (tkinter ships with the standard python.org Windows/macOS installer, no separate
 # install needed.)
+#
+# numpy, tifffile, and pillow are a real departure from Phase 1's "just requests"
+# story: the server no longer generates a preview image for the client, so the
+# client now loads and contrast-stretches the original TIFFs itself to render the
+# review screen. All three have prebuilt wheels on Windows/macOS — no compiler, no
+# admin rights needed, same install story as before, just one `pip install` away.
 requests
+numpy
+tifffile
+pillow
