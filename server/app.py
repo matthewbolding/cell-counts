@@ -73,6 +73,15 @@ def _gpu_available() -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# GPU memory diagnostics (authenticated — not for the client UI, for debugging
+# "why does nvidia-smi show more than expected" without having to guess)
+# --------------------------------------------------------------------------- #
+@app.get("/admin/gpu")
+def gpu_stats(_user: str = Depends(require_auth)) -> dict:
+    return jobs.gpu_memory_stats()
+
+
+# --------------------------------------------------------------------------- #
 # Chunked upload
 # --------------------------------------------------------------------------- #
 class InitUploadRequest(BaseModel):

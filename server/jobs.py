@@ -28,6 +28,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import torch
+
 import segment
 import uploads
 
@@ -90,6 +92,25 @@ def init(cpu: bool = False, fp32: bool = False) -> None:
 
 def model_loaded() -> bool:
     return _model is not None
+
+
+def gpu_memory_stats() -> dict[str, Any]:
+    """`allocated` is memory actually held by live tensors right now — if this
+    is small while `reserved` (what `nvidia-smi` shows) is large, that's
+    PyTorch's caching allocator sitting on freed memory as a cache, not a leak.
+    `max_*` are the high-water marks since the process started (or since the
+    last `reset_peak_stats`), useful for telling "this session touched one huge
+    image" apart from "this has been climbing steadily," after the fact.
+    """
+    if not torch.cuda.is_available():
+        return {"gpu": False}
+    return {
+        "gpu": True,
+        "allocated_mb": round(torch.cuda.memory_allocated() / 1024**2, 1),
+        "reserved_mb": round(torch.cuda.memory_reserved() / 1024**2, 1),
+        "max_allocated_mb": round(torch.cuda.max_memory_allocated() / 1024**2, 1),
+        "max_reserved_mb": round(torch.cuda.max_memory_reserved() / 1024**2, 1),
+    }
 
 
 def enqueue(final_path: Path, filename: str, params: dict[str, Any] | None = None) -> str:
@@ -179,3 +200,16 @@ def _run_job(job_id: str) -> None:
         _set_status(job_id, status="error", error=str(exc))
     finally:
         uploads.cleanup_final(final_path)
+        # PyTorch's caching allocator never hands memory back to the driver on
+        # its own — it just keeps whatever peak it's needed as a cache for next
+        # time. The corpus varies wildly in size (small crops up to ~100+
+        # megapixel images), so that peak climbs a lot over a session even
+        # though only one image is ever segmented at a time. This returns
+        # whatever's genuinely unused back to the driver after every job, so
+        # `nvidia-smi` reflects real recent need instead of a session-long high
+        # water mark. Cheap: nothing is still using that memory at this point,
+        # and the next job's first allocation just re-requests it from the
+        # driver (a handful of milliseconds against jobs that run tens of
+        # seconds to minutes).
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

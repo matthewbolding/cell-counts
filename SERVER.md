@@ -122,3 +122,14 @@ address when signing into the client.
   they're no longer needed; abandoned uploads older than 24h are swept
   automatically.
 - Job history lives in `server/data/jobs.sqlite3`.
+- `nvidia-smi` will climb over a session and won't come back down on its own —
+  PyTorch's GPU allocator caches whatever peak it's needed rather than handing
+  memory back to the driver, and the corpus varies from small crops up to
+  100+ megapixel images, so that peak can legitimately be several GB above the
+  post-startup baseline. Each job calls `torch.cuda.empty_cache()` when it
+  finishes to keep the reported number close to real recent need instead of a
+  session-long high-water mark. `GET /admin/gpu` (authenticated) reports
+  `allocated_mb` (memory actually in use by live tensors right now) vs.
+  `reserved_mb` (what `nvidia-smi` shows, including idle cache) — if
+  `allocated` is small while `reserved` is large, that confirms it's cache,
+  not a leak, without having to guess.
