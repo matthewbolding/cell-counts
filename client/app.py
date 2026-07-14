@@ -22,6 +22,7 @@ import os
 import sys
 import threading
 import tkinter as tk
+import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -312,8 +313,63 @@ class CellCountsApp(tk.Tk):
                          queue: ProcessingQueue) -> None:
         try:
             self._run_processing(folder, manifest, recognized, queue)
+        except Exception as exc:  # noqa: BLE001 — this is a background thread; an
+            # uncaught exception here would otherwise just die silently (no error
+            # dialog, no log line, no status update) leaving every dot frozen
+            # wherever it was, indistinguishable from things still genuinely being
+            # in progress. Surface it instead of losing it.
+            traceback.print_exc()
+            self.ui_light("error")
+            self.ui_status(f"Processing stopped unexpectedly: {exc}")
+            self.ui_log(f"ERROR: background processing crashed: {exc}")
         finally:
             self._active_processing_folders.discard(folder)
+
+    def _reconcile_outstanding_jobs(self, manifest: Manifest, recognized: list[ScannedFile]) -> None:
+        """One-shot status check (not the blocking `poll_job`) for every
+        recognized file the manifest still has marked "processing" from a
+        previous session — updates the manifest immediately for anything the
+        server already finished. Best-effort: called only after the health
+        check above already confirmed the server's reachable, and any failure
+        here (a single request, not a job) just leaves that file to be handled
+        by the normal resume-and-poll path further down, so this can't make
+        things worse, only faster when it works.
+        """
+        outstanding = [sf for sf in recognized
+                       if manifest.data["images"].get(sf.path.name, {}).get("status") == "processing"]
+        if not outstanding:
+            return
+
+        self.ui_status(f"Checking on {len(outstanding)} job(s) from a previous session...")
+        reconciled = 0
+        for sf in outstanding:
+            entry = manifest.data["images"][sf.path.name]
+            job_id = entry.get("job_id")
+            prefix, channel, file_hash = entry.get("prefix"), entry.get("channel"), entry.get("hash")
+            if not job_id or not prefix or not channel or not file_hash:
+                continue  # malformed/legacy entry -- leave as "processing", the resume/poll path below will sort it out
+            try:
+                job = self.client.get_job(job_id)
+            except ApiError:
+                continue  # left as "processing" -- the normal resume/poll path below will sort it out
+            try:
+                if job["status"] == "done":
+                    result = job["result"]
+                    manifest.record_result(sf.path.name, prefix, channel, file_hash,
+                                            result["width"], result["height"], result["params"], result["cells"])
+                    reconciled += 1
+                elif job["status"] == "error":
+                    manifest.record_error(sf.path.name, prefix, channel, file_hash,
+                                           job.get("error") or "job failed")
+                    reconciled += 1
+            except (KeyError, TypeError) as exc:
+                # Unexpected job payload shape -- don't let one odd entry abort
+                # reconciling the rest, and don't let it kill the whole run either.
+                self.ui_log(f"{sf.path.name}: couldn't reconcile previous job ({exc}); will resume normally.")
+
+        if reconciled:
+            self.ui_log(f"{reconciled}/{len(outstanding)} file(s) had already finished on the server "
+                         "while this app was closed.")
 
     def _run_processing(self, folder: Path, manifest: Manifest, recognized: list[ScannedFile],
                          queue: ProcessingQueue) -> None:
@@ -322,9 +378,38 @@ class CellCountsApp(tk.Tk):
             self.ui_light("idle")
             return
 
+        # Connect first, before doing anything slow. This also means we don't
+        # spend minutes re-hashing a large folder (every recognized file gets
+        # read in full for its SHA256 below) only to discover the server was
+        # unreachable the whole time.
+        self.ui_light("connecting")
+        self.ui_status(f"Connecting to {self.server_url}...")
+        try:
+            health = self.client.health()
+        except ApiError as exc:
+            self.ui_light("error")
+            self.ui_status(f"Could not reach server: {exc}")
+            self.ui_log(f"ERROR connecting to server: {exc}")
+            self.ui_error("Connection failed", str(exc))
+            return
+        self.ui_light("connected")
+        self.ui_log(f"Connected to {self.server_url} "
+                     f"(gpu={health.get('gpu')}, model_loaded={health.get('model_loaded')}).")
+
+        # Reconcile pass: the manifest may still say "processing" for files
+        # whose jobs actually finished on the server while this app was
+        # closed — the hash-scan below is what would normally discover that,
+        # but it reads every recognized file in full to compute its SHA256
+        # first, which can take a long time over a large folder. Until that
+        # finishes, the sidebar would keep showing "processing" for files that
+        # have actually been done for a while. This is a handful of cheap
+        # status-only requests (no file I/O), so it runs first and updates the
+        # manifest immediately for anything the server already resolved.
+        self._reconcile_outstanding_jobs(manifest, recognized)
+
         self.ui_log(f"Found {len(recognized)} recognized image(s); hashing...")
         to_process: list[QueueItem] = []
-        resumed: list[tuple[ScannedFile, str, str]] = []  # already submitted last session, not yet done
+        resumed: list[tuple[ScannedFile, str, str]] = []  # still genuinely outstanding after reconciling
         for i, sf in enumerate(recognized, 1):
             self.ui_status(f"Hashing {sf.path.name} ({i}/{len(recognized)})")
             file_hash = hash_file(sf.path)
@@ -357,20 +442,6 @@ class CellCountsApp(tk.Tk):
                 if not persisted.get("running", True):
                     queue.stop()
             queue.enqueue(to_process)
-
-        self.ui_light("connecting")
-        self.ui_status(f"Connecting to {self.server_url}...")
-        try:
-            health = self.client.health()
-        except ApiError as exc:
-            self.ui_light("error")
-            self.ui_status(f"Could not reach server: {exc}")
-            self.ui_log(f"ERROR connecting to server: {exc}")
-            self.ui_error("Connection failed", str(exc))
-            return
-        self.ui_light("connected")
-        self.ui_log(f"Connected to {self.server_url} "
-                     f"(gpu={health.get('gpu')}, model_loaded={health.get('model_loaded')}).")
 
         # Phase 1: get everything durably queued server-side first, uploading
         # one file at a time but never waiting for a job to finish before

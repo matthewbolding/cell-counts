@@ -38,15 +38,18 @@ python client/app.py
    choose the folder containing your `{PREFIX}_{CCK,CHR,SNAP}.tif` images (e.g.
    `A1_SNAP.tif`, `A1_CCK.tif`, ...).
 3. **The review screen opens right away** — you don't have to wait for processing
-   to finish before you can look around. In the background, the app hashes every
-   recognized image and skips anything already processed (tracked in a
-   `cellcounts.json` file it creates in that folder — don't delete it, it's what
-   makes re-opening the same folder fast); anything new or changed gets uploaded
-   first, then segmented. Once a file finishes uploading it's on the server for
-   good — closing the app doesn't stop or lose it, segmentation keeps running
-   there regardless, and reopening the folder later just checks in on results
-   instead of uploading anything twice. See "Reviewing" below for the readiness
-   dots that show you what's done, in progress, or still pending.
+   to finish before you can look around. First, a quick check-in with the server
+   for anything left in progress from last time (in case it actually finished
+   while the app was closed — this is fast, just a status check, not a re-hash of
+   anything). Then, in the background, the app hashes every recognized image and
+   skips anything already processed (tracked in a `cellcounts.json` file it
+   creates in that folder — don't delete it, it's what makes re-opening the same
+   folder fast); anything new or changed gets uploaded first, then segmented.
+   Once a file finishes uploading it's on the server for good — closing the app
+   doesn't stop or lose it, segmentation keeps running there regardless, and
+   reopening the folder later just checks in on results instead of uploading
+   anything twice. See "Reviewing" below for the readiness dots that show you
+   what's done, in progress, or still pending.
 
 The bottom of the window has two things to watch:
 

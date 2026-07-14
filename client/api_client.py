@@ -101,14 +101,21 @@ class ApiClient:
         self._raise_for_status(complete_resp)
         return complete_resp.json()["job_id"]
 
+    def get_job(self, job_id: str) -> dict[str, Any]:
+        """One-shot, non-blocking status check — unlike `poll_job`, returns
+        immediately with whatever the job's current status is instead of
+        waiting for it to finish. Used to cheaply check on jobs left over from
+        a previous session before committing to a slow full folder rescan."""
+        resp = self.session.get(self._url(f"/jobs/{job_id}"), auth=self.auth, timeout=self.timeout)
+        self._raise_for_status(resp)
+        return resp.json()
+
     def poll_job(self, job_id: str, on_tick: Callable[[dict], None] | None = None,
                  timeout_seconds: float = 3600) -> dict[str, Any]:
         """Block (with backoff) until the job is done, returning its result dict."""
         start = time.time()
         while True:
-            resp = self.session.get(self._url(f"/jobs/{job_id}"), auth=self.auth, timeout=self.timeout)
-            self._raise_for_status(resp)
-            job = resp.json()
+            job = self.get_job(job_id)
             if on_tick:
                 on_tick(job)
 
