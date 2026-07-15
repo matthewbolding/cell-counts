@@ -14,9 +14,15 @@
 # (XLSX export) round out the list for the same reason: both ship prebuilt wheels,
 # no compiler needed, and both were chosen specifically to avoid heavier
 # alternatives (shapely, pandas) for what's a small slice of what each offers.
+#
+# websockets (ws_client.py) is the sync client for /ws/jobs -- job status is
+# pushed to the client instead of polled, so no separate polling library or
+# asyncio event loop is needed here; websockets.sync.client fits this
+# codebase's plain-threading style directly.
 requests
 numpy
 tifffile
 pillow
 scikit-image
 openpyxl
+websockets

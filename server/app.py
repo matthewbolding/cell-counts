@@ -11,16 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 import jobs
 import uploads
-from auth import require_auth
+from auth import require_auth, require_auth_ws
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
@@ -39,11 +40,40 @@ async def _sweep_loop() -> None:
             log.exception("stale upload sweep failed")
 
 
+# --------------------------------------------------------------------------- #
+# Job status push (/ws/jobs) -- jobs.py's worker thread is plain sync
+# (threading, no asyncio), so it can't await a websocket send directly.
+# _broadcast_status_change (registered with jobs.py as a callback) bridges
+# that sync call onto this module's asyncio event loop via
+# run_coroutine_threadsafe, captured once at startup.
+# --------------------------------------------------------------------------- #
+_ws_clients: set[WebSocket] = set()
+_ws_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _broadcast_status_change(job_id: str, job: dict) -> None:
+    if _ws_loop is None or not _ws_clients:
+        return
+    payload = json.dumps(job)
+    asyncio.run_coroutine_threadsafe(_broadcast(payload), _ws_loop)
+
+
+async def _broadcast(payload: str) -> None:
+    for ws in list(_ws_clients):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            _ws_clients.discard(ws)
+
+
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
+    global _ws_loop
     cpu = os.environ.get("CELLCOUNTS_CPU", "").lower() in ("1", "true", "yes")
     fp32 = os.environ.get("CELLCOUNTS_FP32", "").lower() in ("1", "true", "yes")
     jobs.init(cpu=cpu, fp32=fp32)
+    _ws_loop = asyncio.get_running_loop()
+    jobs.set_status_change_hook(_broadcast_status_change)
     sweep_task = asyncio.create_task(_sweep_loop())
     try:
         yield
@@ -157,3 +187,26 @@ class ReorderJobsRequest(BaseModel):
 def reorder_jobs(req: ReorderJobsRequest, _user: str = Depends(require_auth)) -> dict:
     jobs.reorder(req.order)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Job status push -- one message per status transition (same dict shape as
+# GET /jobs/{id}), broadcast to every connected client. The client sends
+# nothing meaningful; this just holds the connection open long enough to
+# detect a disconnect and clean up _ws_clients.
+# --------------------------------------------------------------------------- #
+@app.websocket("/ws/jobs")
+async def ws_jobs(websocket: WebSocket) -> None:
+    user = require_auth_ws(websocket)
+    if user is None:
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+    _ws_clients.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _ws_clients.discard(websocket)

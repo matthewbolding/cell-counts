@@ -25,7 +25,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -76,6 +76,16 @@ _model = None
 _queue = _ReorderableQueue()
 _worker_thread: threading.Thread | None = None
 _db_lock = threading.Lock()
+# Set by app.py at startup so _set_status can push each status transition out
+# over the /ws/jobs websocket -- kept as a plain sync callback (not an asyncio
+# import here) so this module stays pure-sync; app.py is the only place that
+# needs to know about the event loop/websocket connections.
+_on_status_change: Callable[[str, dict], None] | None = None
+
+
+def set_status_change_hook(fn: Callable[[str, dict], None] | None) -> None:
+    global _on_status_change
+    _on_status_change = fn
 
 
 def _connect() -> sqlite3.Connection:
@@ -209,6 +219,10 @@ def _set_status(job_id: str, **fields: Any) -> None:
     with _db_lock:
         _conn.execute(f"UPDATE jobs SET {cols} WHERE id=?", values)
         _conn.commit()
+    if _on_status_change is not None:
+        job = get(job_id)
+        if job is not None:
+            _on_status_change(job_id, job)
 
 
 def _worker_loop() -> None:

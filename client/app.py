@@ -29,10 +29,12 @@ from tkinter import filedialog, messagebox, ttk
 import credentials
 import state
 from api_client import ApiClient, ApiError
+from job_router import JobRouter, RunBatch
 from manifest import Manifest, ScannedFile, hash_file, scan_folder
 from processing_queue import QUEUE_STATE_NAME, ProcessingQueue, QueueItem, load_persisted_order
 from review import ReviewPanel
 from statusbar import StatusBar
+from ws_client import JobEventsClient
 
 DEFAULT_SERVER_URL = os.environ.get("CELLCOUNTS_SERVER_URL", "")
 
@@ -137,6 +139,8 @@ class CellCountsApp(tk.Tk):
 
         self.server_url: str | None = None
         self.client: ApiClient | None = None
+        self.job_router: JobRouter | None = None
+        self.job_events: JobEventsClient | None = None
         self.folder: Path | None = None
         self.manifest: Manifest | None = None
         self.queue: ProcessingQueue | None = None
@@ -234,6 +238,11 @@ class CellCountsApp(tk.Tk):
         server_url, username, password, reopen_last = login_result
         self.server_url = server_url
         self.client = ApiClient(self.server_url, username, password)
+        self.job_router = JobRouter(self.client, on_log=self.ui_log)
+        self.job_events = JobEventsClient(self.server_url, username, password,
+                                           on_event=self.job_router.handle_event,
+                                           on_connect=self.job_router.resync)
+        self.job_events.start()
 
         last_folder = state.get_last_folder()
         if reopen_last and last_folder is not None and last_folder.is_dir():
@@ -288,6 +297,8 @@ class CellCountsApp(tk.Tk):
     def _on_close(self) -> None:
         if self.review_panel is not None:
             self.review_panel.close()
+        if self.job_events is not None:
+            self.job_events.stop()
         self.destroy()
 
     def _show_review_panel(self, manifest: Manifest, recognized: list[ScannedFile],
@@ -443,27 +454,27 @@ class CellCountsApp(tk.Tk):
                     queue.stop()
             queue.enqueue(to_process)
 
-        # Phase 1: get everything durably queued server-side first, uploading
-        # one file at a time but never waiting for a job to finish before
-        # starting the next upload. Each file's job_id is saved to the
-        # manifest the moment it's obtained — from that instant on, the file
-        # is the server's problem: closing this app (or it crashing) doesn't
-        # stop or lose the segmentation, and next launch resumes polling
-        # instead of re-uploading. Re-uploading an already-outstanding file
-        # used to create two jobs sharing one server-side file, where
-        # whichever finished first deleted it out from under the other
-        # (fixed server-side too, but no reason to do it needlessly).
+        # Uploading proceeds as before (one file at a time, queue-ordered), but
+        # results are no longer pulled down by polling at all: the server
+        # pushes each status transition over /ws/jobs the instant it happens
+        # (see job_router.py / ws_client.py), and self.job_router applies it
+        # to this manifest/queue immediately, regardless of what else this
+        # thread is doing. `batch` just tracks how many of *this* run's jobs
+        # are still outstanding so the final summary below can wait for them
+        # (via a Condition, not a timer) without gating any individual file's
+        # visible status/result on that wait.
         if resumed:
             self.ui_log(f"Resuming {len(resumed)} job(s) already in progress from a previous session.")
-        pending_polls: list[tuple[ScannedFile, str, str]] = list(resumed)
+        batch = RunBatch()
         # Resumed jobs are already past the upload phase but never went through
         # pop_next()/finish_upload() this session -- track them explicitly so
         # they're visible/reorderable in the sidebar too, not just newly
         # uploaded files.
         for sf, file_hash, job_id in resumed:
             queue.track_server_job(sf, file_hash, job_id)
+            self.job_router.register(job_id, sf, file_hash, manifest, queue, batch)
 
-        n_ok = n_err = 0
+        n_upload_err = 0
         uploaded = 0
         total_upload = len(to_process)
         while (item := queue.pop_next()) is not None:
@@ -479,67 +490,29 @@ class CellCountsApp(tk.Tk):
                         f"Uploading {label}: chunk {done}/{total}"),
                 )
                 manifest.record_submitted(sf.path.name, sf.prefix, sf.channel, file_hash, job_id)
-                pending_polls.append((sf, file_hash, job_id))
                 queue.finish_upload(item, job_id)
+                self.job_router.register(job_id, sf, file_hash, manifest, queue, batch)
             except ApiError as exc:
                 manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, str(exc))
                 self.ui_log(f"ERROR uploading {sf.path.name}: {exc}")
-                n_err += 1
+                n_upload_err += 1
                 queue.remove(item.filename)
 
-        if pending_polls:
-            self.ui_log(f"{len(pending_polls)} file(s) queued on the server — segmentation continues "
+        n_submitted = len(resumed) + (uploaded - n_upload_err)
+        if n_submitted:
+            self.ui_log(f"{n_submitted} file(s) queued on the server — segmentation continues "
                          "even if this app is closed now.")
 
-        # Phase 2: wait for results. Nothing from here on is needed for the
-        # server to keep working — this is purely pulling results back down.
-        for sf, file_hash, job_id in pending_polls:
-            try:
-                result = self._poll_with_resubmit(sf, file_hash, job_id, queue)
-                manifest.record_result(
-                    sf.path.name, sf.prefix, sf.channel, file_hash,
-                    result["width"], result["height"], result["params"], result["cells"],
-                )
-                n_kept = sum(1 for c in result["cells"] if c["status"] == "kept")
-                self.ui_log(f"{sf.path.name}: {n_kept} cells kept "
-                             f"({len(result['cells']) - n_kept} filtered).")
-                n_ok += 1
-            except ApiError as exc:
-                manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, str(exc))
-                self.ui_log(f"ERROR processing {sf.path.name}: {exc}")
-                n_err += 1
-            finally:
-                # Leaves the sidebar exactly when the manifest entry becomes
-                # authoritative (done or error) -- never before.
-                queue.remove(sf.path.name)
+        # Nothing from here on is needed for the server to keep working — this
+        # just waits (event-driven, no polling) for every job registered above
+        # to resolve via a pushed status change.
+        batch.wait_until_empty()
 
+        n_ok = batch.n_ok
+        n_err = batch.n_err + n_upload_err
         self.ui_light("connected" if n_err == 0 else "error")
         self.ui_status(f"Done. {n_ok} processed, {n_err} failed, {up_to_date} already up to date.")
         self.ui_log(f"Finished: {n_ok} processed, {n_err} failed.")
-
-    def _poll_with_resubmit(self, sf: ScannedFile, file_hash: str, job_id: str,
-                             queue: ProcessingQueue) -> dict:
-        """Poll `job_id`; if the server has no record of it (status_code 404 —
-        e.g. it was redeployed/restarted since the job was submitted and its
-        SQLite job history didn't carry over), fall back to a fresh upload once
-        rather than failing the file outright."""
-        label = sf.path.name
-
-        def on_tick(job, label=label):
-            self.ui_status(f"{job['status'].title()}: {label}")
-            queue.update_server_status(label, job["status"])
-
-        self.ui_status(f"Waiting for server to process {label}...")
-        try:
-            return self.client.poll_job(job_id, on_tick=on_tick)
-        except ApiError as exc:
-            if exc.status_code != 404:
-                raise
-            self.ui_log(f"{label}: server no longer knows this job (likely restarted) — re-uploading.")
-            new_job_id = self.client.upload_file(sf.path, file_hash)
-            queue.update_job_id(label, new_job_id)
-            self.ui_status(f"Waiting for server to process {label}...")
-            return self.client.poll_job(new_job_id, on_tick=on_tick)
 
 
 def main(argv=None) -> int:
