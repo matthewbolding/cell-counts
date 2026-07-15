@@ -18,6 +18,14 @@ old format the first time it's opened.)
 
 Writes are atomic (`.tmp` + `.bak` + `os.replace`) since a corrupted manifest or
 sidecar risks real review work.
+
+Each image entry also carries the mtime/size seen at the moment its hash was
+last recorded, so a reopen can trust that hash without re-reading the whole
+file (`cached_hash()`) whenever both still match — the same stat-first
+shortcut rsync/git use, full content hashing only as the fallback when they
+don't (or there's no cached stat at all, e.g. a `cellcounts.json` written
+before this existed — it just always falls through to a real hash there,
+self-upgrading that entry for next time).
 """
 
 from __future__ import annotations
@@ -52,6 +60,17 @@ def hash_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(HASH_CHUNK_SIZE), b""):
             h.update(chunk)
     return "sha256:" + h.hexdigest()
+
+
+def _stat_identity(path: Path) -> tuple[float | None, int | None]:
+    """(mtime, size) to cache alongside a hash, or (None, None) if the file
+    vanished out from under us -- callers just get a cache that never
+    fast-path-matches for that entry, same as before this existed."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    return st.st_mtime, st.st_size
 
 
 def _atomic_write_json(path: Path, obj) -> None:
@@ -122,6 +141,23 @@ class Manifest:
 
         return {"schema_version": SCHEMA_VERSION, "images": images}
 
+    def cached_hash(self, filename: str, path: Path) -> str | None:
+        """Trust the previously-recorded hash without reading the file, if
+        its mtime+size still match what was recorded last time (the same
+        stat-first shortcut rsync/git use) -- returns None, meaning the
+        caller must do a real hash_file() read, when there's no cached stat,
+        it doesn't match, or this is a legacy entry from before mtime/size
+        were tracked (so this is automatically backwards compatible: an old
+        cellcounts.json just always misses here until the next real hash
+        upgrades that entry with stat fields for next time)."""
+        entry = self.data["images"].get(filename)
+        if entry is None or entry.get("mtime") is None or entry.get("size") is None:
+            return None
+        mtime, size = _stat_identity(path)
+        if mtime is None or mtime != entry["mtime"] or size != entry["size"]:
+            return None
+        return entry.get("hash")
+
     def needs_processing(self, filename: str, current_hash: str) -> bool:
         entry = self.data["images"].get(filename)
         if entry is None:
@@ -142,13 +178,16 @@ class Manifest:
             return None
         return entry.get("job_id")
 
-    def record_submitted(self, filename: str, prefix: str, channel: str, file_hash: str, job_id: str) -> None:
+    def record_submitted(self, filename: str, prefix: str, channel: str, file_hash: str, job_id: str,
+                          path: Path) -> None:
         """Written immediately after a successful upload, before waiting for the
         job to finish — so a client that closes (or crashes) between now and the
         job actually completing resumes polling `job_id` next launch instead of
         re-uploading and creating a duplicate job."""
+        mtime, size = _stat_identity(path)
         self.data["images"][filename] = {
             "prefix": prefix, "channel": channel, "hash": file_hash,
+            "mtime": mtime, "size": size,
             "width": None, "height": None,
             "status": "processing", "processed_at": None,
             "params": None, "error": None, "job_id": job_id,
@@ -156,22 +195,27 @@ class Manifest:
         self.save()
 
     def record_result(self, filename: str, prefix: str, channel: str, file_hash: str,
-                       width: int, height: int, params: dict, cells: list[dict]) -> None:
+                       width: int, height: int, params: dict, cells: list[dict], path: Path) -> None:
         # Heavy data first: only mark `status: "done"` in the light manifest once the
         # cells are actually on disk, so a crash between the two writes can't leave a
         # "done" entry pointing at a stale/missing sidecar.
         self.save_cells(filename, cells)
+        mtime, size = _stat_identity(path)
         self.data["images"][filename] = {
             "prefix": prefix, "channel": channel, "hash": file_hash,
+            "mtime": mtime, "size": size,
             "width": width, "height": height,
             "status": "done", "processed_at": now_iso(),
             "params": params, "error": None,
         }
         self.save()
 
-    def record_error(self, filename: str, prefix: str, channel: str, file_hash: str, error: str) -> None:
+    def record_error(self, filename: str, prefix: str, channel: str, file_hash: str, error: str,
+                      path: Path) -> None:
+        mtime, size = _stat_identity(path)
         self.data["images"][filename] = {
             "prefix": prefix, "channel": channel, "hash": file_hash,
+            "mtime": mtime, "size": size,
             "width": None, "height": None,
             "status": "error", "processed_at": now_iso(),
             "params": None, "error": error,

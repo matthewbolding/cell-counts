@@ -151,7 +151,7 @@ class JobRouter:
             result = job["result"]
             manifest.record_result(
                 sf.path.name, sf.prefix, sf.channel, file_hash,
-                result["width"], result["height"], result["params"], result["cells"],
+                result["width"], result["height"], result["params"], result["cells"], sf.path,
             )
             n_kept = sum(1 for c in result["cells"] if c["status"] == "kept")
             self._on_log(f"{sf.path.name}: {n_kept} cells kept "
@@ -160,7 +160,7 @@ class JobRouter:
             batch.resolve(ok=True)
         else:  # "error"
             error = job.get("error") or "job failed"
-            manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, error)
+            manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, error, sf.path)
             self._on_log(f"ERROR processing {sf.path.name}: {error}")
             queue.remove(sf.path.name)
             batch.resolve(ok=False)

@@ -395,7 +395,8 @@ class CellCountsApp(tk.Tk):
             self.review_panel.export_data()
 
     # ------------------------------------------------------------------ #
-    # Background worker: hash, skip up-to-date, then drain the queue
+    # Background worker: scan (stat/hash) and upload run concurrently, each
+    # on its own thread -- see _run_processing.
     # ------------------------------------------------------------------ #
     def _process_folder(self, folder: Path, manifest: Manifest, recognized: list[ScannedFile],
                          queue: ProcessingQueue) -> None:
@@ -413,52 +414,6 @@ class CellCountsApp(tk.Tk):
         finally:
             self._active_processing_folders.discard(folder)
 
-    def _reconcile_outstanding_jobs(self, manifest: Manifest, recognized: list[ScannedFile]) -> None:
-        """One-shot status check (not the blocking `poll_job`) for every
-        recognized file the manifest still has marked "processing" from a
-        previous session — updates the manifest immediately for anything the
-        server already finished. Best-effort: called only after the health
-        check above already confirmed the server's reachable, and any failure
-        here (a single request, not a job) just leaves that file to be handled
-        by the normal resume-and-poll path further down, so this can't make
-        things worse, only faster when it works.
-        """
-        outstanding = [sf for sf in recognized
-                       if manifest.data["images"].get(sf.path.name, {}).get("status") == "processing"]
-        if not outstanding:
-            return
-
-        self.ui_status(f"Checking on {len(outstanding)} job(s) from a previous session...")
-        reconciled = 0
-        for sf in outstanding:
-            entry = manifest.data["images"][sf.path.name]
-            job_id = entry.get("job_id")
-            prefix, channel, file_hash = entry.get("prefix"), entry.get("channel"), entry.get("hash")
-            if not job_id or not prefix or not channel or not file_hash:
-                continue  # malformed/legacy entry -- leave as "processing", the resume/poll path below will sort it out
-            try:
-                job = self.client.get_job(job_id)
-            except ApiError:
-                continue  # left as "processing" -- the normal resume/poll path below will sort it out
-            try:
-                if job["status"] == "done":
-                    result = job["result"]
-                    manifest.record_result(sf.path.name, prefix, channel, file_hash,
-                                            result["width"], result["height"], result["params"], result["cells"])
-                    reconciled += 1
-                elif job["status"] == "error":
-                    manifest.record_error(sf.path.name, prefix, channel, file_hash,
-                                           job.get("error") or "job failed")
-                    reconciled += 1
-            except (KeyError, TypeError) as exc:
-                # Unexpected job payload shape -- don't let one odd entry abort
-                # reconciling the rest, and don't let it kill the whole run either.
-                self.ui_log(f"{sf.path.name}: couldn't reconcile previous job ({exc}); will resume normally.")
-
-        if reconciled:
-            self.ui_log(f"{reconciled}/{len(outstanding)} file(s) had already finished on the server "
-                         "while this app was closed.")
-
     def _run_processing(self, folder: Path, manifest: Manifest, recognized: list[ScannedFile],
                          queue: ProcessingQueue) -> None:
         if not recognized:
@@ -466,10 +421,7 @@ class CellCountsApp(tk.Tk):
             self.ui_light("idle")
             return
 
-        # Connect first, before doing anything slow. This also means we don't
-        # spend minutes re-hashing a large folder (every recognized file gets
-        # read in full for its SHA256 below) only to discover the server was
-        # unreachable the whole time.
+        # Connect first, before doing anything slow.
         self.ui_light("connecting")
         self.ui_status(f"Connecting to {self.server_url}...")
         try:
@@ -484,99 +436,33 @@ class CellCountsApp(tk.Tk):
         self.ui_log(f"Connected to {self.server_url} "
                      f"(gpu={health.get('gpu')}, model_loaded={health.get('model_loaded')}).")
 
-        # Reconcile pass: the manifest may still say "processing" for files
-        # whose jobs actually finished on the server while this app was
-        # closed — the hash-scan below is what would normally discover that,
-        # but it reads every recognized file in full to compute its SHA256
-        # first, which can take a long time over a large folder. Until that
-        # finishes, the sidebar would keep showing "processing" for files that
-        # have actually been done for a while. This is a handful of cheap
-        # status-only requests (no file I/O), so it runs first and updates the
-        # manifest immediately for anything the server already resolved.
-        self._reconcile_outstanding_jobs(manifest, recognized)
+        self.ui_log(f"Found {len(recognized)} recognized image(s); checking for changes...")
 
-        self.ui_log(f"Found {len(recognized)} recognized image(s); hashing...")
-        to_process: list[QueueItem] = []
-        resumed: list[tuple[ScannedFile, str, str]] = []  # still genuinely outstanding after reconciling
-        for i, sf in enumerate(recognized, 1):
-            self.ui_status(f"Hashing {sf.path.name} ({i}/{len(recognized)})")
-            file_hash = hash_file(sf.path)
-            pending_job_id = manifest.pending_job(sf.path.name, file_hash)
-            if pending_job_id:
-                resumed.append((sf, file_hash, pending_job_id))
-            elif manifest.needs_processing(sf.path.name, file_hash):
-                to_process.append(QueueItem(sf=sf, file_hash=file_hash))
+        # Scanning (this thread) and uploading (upload_thread) now run
+        # concurrently rather than the old "hash the whole folder, then start
+        # uploading" two-phase sequence -- see _scan_and_enqueue/
+        # _drain_upload_queue for how they hand off via `queue`. `stats`
+        # collects counts for the final summary below: each key is only ever
+        # written by one of the two threads, so no lock is needed -- the
+        # join()s below are the memory barrier that makes reading it safe
+        # afterward. `batch` tracks outstanding *server-side* jobs (uploaded
+        # or resumed) so we can wait for every one of them to resolve via a
+        # pushed status change (job_router.py/ws_client.py), not a timer.
+        batch = RunBatch()
+        stats = {"up_to_date": 0, "to_process": 0, "resumed": 0, "uploaded": 0, "n_upload_err": 0}
 
-        up_to_date = len(recognized) - len(to_process) - len(resumed)
-        resumed_note = f"; {len(resumed)} resuming from a previous session" if resumed else ""
-        self.ui_log(f"{up_to_date} file(s) already up to date; {len(to_process)} need processing{resumed_note}.")
+        upload_thread = threading.Thread(
+            target=self._drain_upload_queue, args=(manifest, queue, batch, stats), daemon=True)
+        upload_thread.start()
+        self._scan_and_enqueue(manifest, recognized, queue, batch, stats)
+        upload_thread.join()
 
-        if not to_process and not resumed:
+        if stats["to_process"] == 0 and stats["resumed"] == 0:
             self.ui_status("All images already processed.")
             self.ui_light("idle")
             return
 
-        if to_process:
-            # Restore a previously-saved queue order/paused-state for this
-            # folder, if any — the hash scan above has no memory of how the
-            # user last arranged the queue, so without this every relaunch
-            # would reset back to plain scan order. Files not mentioned in the
-            # saved order (new since last time) sort after everything that
-            # was, in their natural scan order.
-            persisted = load_persisted_order(queue.persist_path) if queue.persist_path else None
-            if persisted:
-                order_index = {fn: i for i, fn in enumerate(persisted.get("order", []))}
-                to_process.sort(key=lambda item: order_index.get(item.filename, len(order_index)))
-                if not persisted.get("running", True):
-                    queue.stop()
-                    self.after(0, self.pause_uploads_var.set, True)
-            queue.enqueue(to_process)
-
-        # Uploading proceeds as before (one file at a time, queue-ordered), but
-        # results are no longer pulled down by polling at all: the server
-        # pushes each status transition over /ws/jobs the instant it happens
-        # (see job_router.py / ws_client.py), and self.job_router applies it
-        # to this manifest/queue immediately, regardless of what else this
-        # thread is doing. `batch` just tracks how many of *this* run's jobs
-        # are still outstanding so the final summary below can wait for them
-        # (via a Condition, not a timer) without gating any individual file's
-        # visible status/result on that wait.
-        if resumed:
-            self.ui_log(f"Resuming {len(resumed)} job(s) already in progress from a previous session.")
-        batch = RunBatch()
-        # Resumed jobs are already past the upload phase but never went through
-        # pop_next()/finish_upload() this session -- track them explicitly so
-        # they're visible/reorderable in the sidebar too, not just newly
-        # uploaded files.
-        for sf, file_hash, job_id in resumed:
-            queue.track_server_job(sf, file_hash, job_id)
-            self.job_router.register(job_id, sf, file_hash, manifest, queue, batch)
-
-        n_upload_err = 0
-        uploaded = 0
-        total_upload = len(to_process)
-        while (item := queue.pop_next()) is not None:
-            sf, file_hash = item.sf, item.file_hash
-            uploaded += 1
-            label = f"{sf.path.name} ({uploaded}/{total_upload})"
-            self.ui_status(f"Uploading {label}...")
-            self.ui_light("processing")
-            try:
-                job_id = self.client.upload_file(
-                    sf.path, file_hash,
-                    on_chunk=lambda done, total, label=label: self.ui_status(
-                        f"Uploading {label}: chunk {done}/{total}"),
-                )
-                manifest.record_submitted(sf.path.name, sf.prefix, sf.channel, file_hash, job_id)
-                queue.finish_upload(item, job_id)
-                self.job_router.register(job_id, sf, file_hash, manifest, queue, batch)
-            except ApiError as exc:
-                manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, str(exc))
-                self.ui_log(f"ERROR uploading {sf.path.name}: {exc}")
-                n_upload_err += 1
-                queue.remove(item.filename)
-
-        n_submitted = len(resumed) + (uploaded - n_upload_err)
+        n_submitted = stats["resumed"] + (stats["uploaded"] - stats["n_upload_err"])
         if n_submitted:
             self.ui_log(f"{n_submitted} file(s) queued on the server — segmentation continues "
                          "even if this app is closed now.")
@@ -587,10 +473,111 @@ class CellCountsApp(tk.Tk):
         batch.wait_until_empty()
 
         n_ok = batch.n_ok
-        n_err = batch.n_err + n_upload_err
+        n_err = batch.n_err + stats["n_upload_err"]
         self.ui_light("connected" if n_err == 0 else "error")
-        self.ui_status(f"Done. {n_ok} processed, {n_err} failed, {up_to_date} already up to date.")
+        self.ui_status(f"Done. {n_ok} processed, {n_err} failed, {stats['up_to_date']} already up to date.")
         self.ui_log(f"Finished: {n_ok} processed, {n_err} failed.")
+
+    def _classify_and_route(self, sf: ScannedFile, file_hash: str, manifest: Manifest,
+                             queue: ProcessingQueue, batch: RunBatch, stats: dict) -> QueueItem | None:
+        """Resolve one file now that its current hash is known (whether via
+        the fast stat-path or a real read): if a job's already outstanding
+        for this exact content, track it and register it with job_router
+        immediately (job_router.register()'s own catch-up get_job() call is
+        what reveals "oh, this one actually already finished while we were
+        closed" -- this is what replaces the old separate reconcile pass,
+        just inline and per-file instead of a batch pre-pass). Otherwise,
+        returns a QueueItem if it needs (re)uploading, or None if it's
+        already up to date -- either way `stats` is updated so the caller
+        never has to track counts itself."""
+        pending_job_id = manifest.pending_job(sf.path.name, file_hash)
+        if pending_job_id:
+            stats["resumed"] += 1
+            queue.track_server_job(sf, file_hash, pending_job_id)
+            self.job_router.register(pending_job_id, sf, file_hash, manifest, queue, batch)
+            return None
+        if manifest.needs_processing(sf.path.name, file_hash):
+            stats["to_process"] += 1
+            return QueueItem(sf=sf, file_hash=file_hash)
+        stats["up_to_date"] += 1
+        return None
+
+    def _scan_and_enqueue(self, manifest: Manifest, recognized: list[ScannedFile],
+                           queue: ProcessingQueue, batch: RunBatch, stats: dict) -> None:
+        """Runs on this thread, concurrently with _drain_upload_queue on its
+        own: classifies every recognized file, trusting its cached hash when
+        the file's mtime/size haven't changed since it was last recorded
+        (Manifest.cached_hash's rsync/git-style fast path) and only reading a
+        file's full contents when that can't vouch for it. Files resolved via
+        the fast path (the common case reopening an already-processed folder)
+        are enqueued as one batch right away, in the persisted queue order if
+        any; anything that needed a real hash is add()ed one at a time as
+        each finishes, so _drain_upload_queue can start on the first one
+        without waiting for the last."""
+        fast_resolved: list[QueueItem] = []
+        to_hash: list[ScannedFile] = []
+        for sf in recognized:
+            cached = manifest.cached_hash(sf.path.name, sf.path)
+            if cached is None:
+                to_hash.append(sf)
+                continue
+            item = self._classify_and_route(sf, cached, manifest, queue, batch, stats)
+            if item is not None:
+                fast_resolved.append(item)
+
+        # Restore a previously-saved queue order/paused-state for this
+        # folder, if any -- files not mentioned in it (new since last time)
+        # sort after everything that was, in their natural scan order (which
+        # is exactly where the to_hash loop below appends them).
+        persisted = load_persisted_order(queue.persist_path) if queue.persist_path else None
+        if persisted:
+            order_index = {fn: i for i, fn in enumerate(persisted.get("order", []))}
+            fast_resolved.sort(key=lambda item: order_index.get(item.filename, len(order_index)))
+            if not persisted.get("running", True):
+                queue.stop()
+                self.after(0, self.pause_uploads_var.set, True)
+        if fast_resolved:
+            queue.enqueue(fast_resolved)
+
+        for i, sf in enumerate(to_hash, 1):
+            self.ui_status(f"Hashing {sf.path.name} ({i}/{len(to_hash)})")
+            file_hash = hash_file(sf.path)
+            item = self._classify_and_route(sf, file_hash, manifest, queue, batch, stats)
+            if item is not None:
+                queue.add(item)
+
+        queue.close_intake()
+        if stats["resumed"]:
+            self.ui_log(f"Resuming {stats['resumed']} job(s) already in progress from a previous session.")
+        self.ui_log(f"{stats['up_to_date']} file(s) already up to date; "
+                     f"{stats['to_process']} need processing.")
+
+    def _drain_upload_queue(self, manifest: Manifest, queue: ProcessingQueue,
+                             batch: RunBatch, stats: dict) -> None:
+        """Runs concurrently with _scan_and_enqueue: uploads whatever's
+        already queued, blocking (not polling) for more until the scan loop
+        signals it's done adding anything new (ProcessingQueue.pop_next/
+        close_intake)."""
+        while (item := queue.pop_next()) is not None:
+            sf, file_hash = item.sf, item.file_hash
+            stats["uploaded"] += 1
+            label = f"{sf.path.name} ({stats['uploaded']} so far)"
+            self.ui_status(f"Uploading {label}...")
+            self.ui_light("processing")
+            try:
+                job_id = self.client.upload_file(
+                    sf.path, file_hash,
+                    on_chunk=lambda done, total, label=label: self.ui_status(
+                        f"Uploading {label}: chunk {done}/{total}"),
+                )
+                manifest.record_submitted(sf.path.name, sf.prefix, sf.channel, file_hash, job_id, sf.path)
+                queue.finish_upload(item, job_id)
+                self.job_router.register(job_id, sf, file_hash, manifest, queue, batch)
+            except ApiError as exc:
+                manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, str(exc), sf.path)
+                self.ui_log(f"ERROR uploading {sf.path.name}: {exc}")
+                stats["n_upload_err"] += 1
+                queue.remove(item.filename)
 
 
 def main(argv=None) -> int:

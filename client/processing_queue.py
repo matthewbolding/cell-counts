@@ -10,6 +10,14 @@ it via `snapshot()`/`is_processing()` and reorders it via
 `move_up`/`move_down`/`send_to_front`/`send_to_back` — all under one lock, no Tk
 dependency here at all so it's safe to touch from either thread.
 
+app.py's scan loop (deciding what needs (re)processing) and its upload loop
+(draining this queue) now run concurrently rather than one after the other --
+`enqueue()` bulk-loads whatever the scan already knows about up front,
+`add()` feeds anything discovered afterward one at a time, and `pop_next()`
+blocks until either something's available or the scan calls `close_intake()`
+to say nothing more is coming, so the upload loop never has to wait for the
+whole folder to be looked at before it can start on the first file.
+
 An item lives here for its *entire* outstanding lifetime, not just the upload
 step: "local phase" (waiting to upload / uploading, `job_id is None`) followed by
 "server phase" (uploaded, `job_id` set — waiting its turn on the GPU, or actively
@@ -100,10 +108,18 @@ class QueueSnapshot:
 
 class ProcessingQueue:
     def __init__(self, persist_path: Path | None = None) -> None:
-        self._lock = threading.Lock()
+        # A Condition, not a plain Lock, so pop_next() can block on "wake me
+        # when something changes" (a new item added, or intake closed)
+        # instead of returning None the moment it's momentarily empty --
+        # needed now that the scan loop that finds items and the upload loop
+        # that drains them run concurrently (see add()/close_intake()).
+        # Every existing `with self._lock:` still works unchanged -- Condition
+        # is a context manager over the same underlying lock.
+        self._lock = threading.Condition()
         self._items: list[QueueItem] = []
         self._resume_event = threading.Event()
         self._resume_event.set()  # auto-runs by default, matching prior behavior
+        self._intake_closed = False
         self.persist_path = persist_path
 
     def _persist(self) -> None:
@@ -126,22 +142,47 @@ class ProcessingQueue:
     # Worker-thread side
     # ------------------------------------------------------------------ #
     def enqueue(self, items: list[QueueItem]) -> None:
+        """Bulk-load the first, already-known batch (see add() for items
+        discovered afterward, while a consumer may already be draining
+        this)."""
         with self._lock:
             self._items = list(items)
+            self._lock.notify_all()
         self._persist()
 
+    def add(self, item: QueueItem) -> None:
+        """Append one newly-discovered local-phase item -- used by the scan
+        loop to feed pop_next() as each file is resolved, instead of making
+        it wait for the whole folder to be looked at first."""
+        with self._lock:
+            self._items.append(item)
+            self._lock.notify_all()
+        self._persist()
+
+    def close_intake(self) -> None:
+        """Signal that nothing more will be add()ed this session -- lets a
+        blocked pop_next() tell "empty for now, more may still arrive" apart
+        from "empty and truly done." Idempotent."""
+        with self._lock:
+            self._intake_closed = True
+            self._lock.notify_all()
+
     def pop_next(self) -> QueueItem | None:
-        """Block until running, then claim and return the first not-yet-uploaded
-        item. Returns None once nothing local-phase remains queued (server-phase
-        items, already past upload, are untouched by this)."""
-        while True:
-            self._resume_event.wait()
-            with self._lock:
-                for item in self._items:
-                    if item.job_id is None and item.status == "queued":
-                        item.status = "uploading"
-                        return item
-                return None
+        """Block until an unpaused, queued local-phase item is available, or
+        intake has been closed (see close_intake()) with none remaining --
+        whichever comes first. This is what lets a consumer run concurrently
+        with the scan loop that's still feeding it, rather than assuming the
+        whole folder was already scanned before this is ever called."""
+        with self._lock:
+            while True:
+                if self._resume_event.is_set():
+                    for item in self._items:
+                        if item.job_id is None and item.status == "queued":
+                            item.status = "uploading"
+                            return item
+                    if self._intake_closed:
+                        return None
+                self._lock.wait()
 
     def finish_upload(self, item: QueueItem, job_id: str) -> None:
         """Upload succeeded: the item leaves the local phase and re-enters the
@@ -276,6 +317,8 @@ class ProcessingQueue:
 
     def start(self) -> None:
         self._resume_event.set()
+        with self._lock:
+            self._lock.notify_all()  # wake a pop_next() blocked only on the pause
         self._persist()
 
     def stop(self) -> None:

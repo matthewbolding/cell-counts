@@ -38,18 +38,21 @@ python client/app.py
    choose the folder containing your `{PREFIX}_{CCK,CHR,SNAP}.tif` images (e.g.
    `A1_SNAP.tif`, `A1_CCK.tif`, ...).
 3. **The review screen opens right away** — you don't have to wait for processing
-   to finish before you can look around. First, a quick check-in with the server
-   for anything left in progress from last time (in case it actually finished
-   while the app was closed — this is fast, just a status check, not a re-hash of
-   anything). Then, in the background, the app hashes every recognized image and
-   skips anything already processed (tracked in a `cellcounts.json` file it
-   creates in that folder — don't delete it, it's what makes re-opening the same
-   folder fast); anything new or changed gets uploaded first, then segmented.
-   Once a file finishes uploading it's on the server for good — closing the app
-   doesn't stop or lose it, segmentation keeps running there regardless, and
-   reopening the folder later just checks in on results instead of uploading
-   anything twice. See "Reviewing" below for the readiness dots that show you
-   what's done, in progress, or still pending.
+   to finish before you can look around. In the background, the app checks every
+   recognized image against what it already knows (tracked in a `cellcounts.json`
+   file it creates in that folder — don't delete it, it's what makes re-opening
+   the same folder fast): a file whose modification time and size haven't changed
+   since last time is trusted as unchanged without re-reading it, so reopening a
+   folder that's mostly already been processed is nearly instant; anything new,
+   changed, or that only touches that fast check for the first time gets fully
+   re-checked. Checking on jobs still in progress from last time, this scan, and
+   uploading anything that needs it all happen at once rather than one after the
+   other, so results already sitting on the server show up immediately instead of
+   waiting behind a full folder scan. Once a file finishes uploading it's on the
+   server for good — closing the app doesn't stop or lose it, segmentation keeps
+   running there regardless, and reopening the folder later just checks in on
+   results instead of uploading anything twice. See "Reviewing" below for the
+   readiness dots that show you what's done, in progress, or still pending.
 
 The bottom of the window has two things to watch:
 
