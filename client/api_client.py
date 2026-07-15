@@ -101,6 +101,15 @@ class ApiClient:
         self._raise_for_status(complete_resp)
         return complete_resp.json()["job_id"]
 
+    def reorder_jobs(self, job_ids: list[str]) -> None:
+        """Reprioritize whatever's still queued server-side to match
+        `job_ids`'s order. Best-effort on the server (unknown/already-started
+        ids are silently ignored), so nothing to return here."""
+        resp = self.session.post(
+            self._url("/jobs/reorder"), auth=self.auth, timeout=self.timeout,
+            json={"order": job_ids})
+        self._raise_for_status(resp)
+
     def get_job(self, job_id: str) -> dict[str, Any]:
         """One-shot, non-blocking status check — unlike `poll_job`, returns
         immediately with whatever the job's current status is instead of

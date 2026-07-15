@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import queue
 import shutil
 import sqlite3
 import threading
@@ -38,8 +37,43 @@ log = logging.getLogger("jobs")
 DB_PATH = Path("data/jobs.sqlite3")
 JOB_FILES_ROOT = Path("data/jobs")
 
+class _ReorderableQueue:
+    """FIFO by default (`put`/`get`), but `reorder()` lets a caller reprioritize
+    whatever's still waiting — used so the client's sidebar Queue panel can
+    actually change segmentation order after a file's already been uploaded,
+    not just before. Never touches anything the worker has already popped, and
+    isn't persisted anywhere: a server restart already aborts every
+    queued/processing job (see `init()` below), so there's nothing to restore.
+    """
+
+    def __init__(self) -> None:
+        self._items: list[str] = []
+        self._cond = threading.Condition()
+
+    def put(self, job_id: str) -> None:
+        with self._cond:
+            self._items.append(job_id)
+            self._cond.notify()
+
+    def get(self) -> str:
+        with self._cond:
+            while not self._items:
+                self._cond.wait()
+            return self._items.pop(0)
+
+    def reorder(self, order: list[str]) -> None:
+        """Re-sort whatever's still waiting to match `order`. job_ids named in
+        `order` that are no longer waiting (already popped, or never existed)
+        are simply ignored. job_ids currently waiting but not named in `order`
+        keep their existing relative position, sorted after everything that
+        was named -- a stable sort makes this a one-liner."""
+        with self._cond:
+            rank = {job_id: i for i, job_id in enumerate(order)}
+            self._items.sort(key=lambda job_id: (job_id not in rank, rank.get(job_id, 0)))
+
+
 _model = None
-_queue: "queue.Queue[str]" = queue.Queue()
+_queue = _ReorderableQueue()
 _worker_thread: threading.Thread | None = None
 _db_lock = threading.Lock()
 
@@ -141,6 +175,13 @@ def enqueue(final_path: Path, filename: str, params: dict[str, Any] | None = Non
         _conn.commit()
     _queue.put(job_id)
     return job_id
+
+
+def reorder(order: list[str]) -> None:
+    """Reprioritize whatever's still waiting to run, per the client's sidebar
+    Queue panel. Best-effort: job_ids the queue no longer recognizes are
+    silently ignored (see `_ReorderableQueue.reorder`)."""
+    _queue.reorder(order)
 
 
 def get(job_id: str) -> dict | None:

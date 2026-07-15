@@ -56,12 +56,31 @@ DOT_COLORS = {
 ROW_BG = "#f0f0f0"
 ROW_BG_SELECTED = "#cce0ff"
 # Queue rows use the same base look as Samples rows (ROW_BG/ROW_BG_SELECTED) plus
-# two of their own: a fill for "this file is being processed right now" (kept
-# distinct from the blue selection color so a row that's both selected and
-# in-flight doesn't read as ambiguous) and a border color that marks selection via
-# an outline instead of a fill, so it layers on top of the processing fill cleanly.
+# a few of their own: a fill for "this file is being actively worked on right
+# now" (uploading, or segmenting on the GPU -- kept distinct from the blue
+# selection color so a row that's both selected and in-flight doesn't read as
+# ambiguous), a muted fill for "already uploaded, waiting its turn server-side"
+# (committed but not yet running), and a border color that marks selection via
+# an outline instead of a fill, so it layers on top of either fill cleanly.
 QUEUE_PROCESSING_BG = "#fff2cc"
+QUEUE_SERVER_QUEUED_BG = "#e2e6f5"
 QUEUE_SELECTED_BORDER = "#2980b9"
+
+
+def _queue_status_tag(item) -> str:
+    """Short suffix for a Queue row's label -- blank for the common "just
+    waiting to upload" case (matches the panel's original plain look)."""
+    if item.job_id is None:
+        return "uploading" if item.status == "uploading" else ""
+    return "segmenting" if item.status == "processing" else "queued for inference"
+
+
+def _queue_row_bg(item) -> str:
+    if item.status in ("uploading", "processing"):
+        return QUEUE_PROCESSING_BG  # actively happening right now
+    if item.job_id is not None:
+        return QUEUE_SERVER_QUEUED_BG  # committed server-side, waiting its turn
+    return ROW_BG  # still waiting locally, untouched
 # ttk.Scrollbar's default theme renders near-white on some platforms, which
 # disappears against the light widgets it sits next to — plain tk.Scrollbar with
 # explicit colors instead, for one that's actually visible everywhere.
@@ -1562,15 +1581,17 @@ class ReviewPanel(ttk.Frame):
 
     def _refresh_queue_panel(self) -> None:
         snap = self.queue.snapshot()
-        if not snap.items:
-            # Nothing queued or in flight — Start/Stop has nothing to act on.
-            # Showing "Stop" here (the old behavior) implied something was
-            # running that a click could halt, which wasn't true.
+        # Start/Stop only ever pauses local uploads (see processing_queue.py's
+        # module docstring) -- gate it on whether any local-phase item remains,
+        # not on the queue being empty, since server-phase items (already
+        # uploaded, waiting/running on the GPU) leave nothing for a click here
+        # to act on.
+        if not any(it.job_id is None for it in snap.items):
             self.queue_toggle_btn.configure(text="Inactive", state="disabled")
         else:
             self.queue_toggle_btn.configure(text=("Stop" if snap.running else "Start"), state="normal")
 
-        signature = [(it.filename, it.status) for it in snap.items]
+        signature = [(it.filename, it.status, it.job_id) for it in snap.items]
         if signature == self._queue_display_signature:
             # Nothing actually changed since the last poll — leave the rows
             # completely untouched. Rebuilding unconditionally on every 500ms
@@ -1596,7 +1617,11 @@ class ReviewPanel(ttk.Frame):
             row = tk.Frame(self.queue_rows_frame, bg=ROW_BG, highlightthickness=2,
                             highlightbackground=ROW_BG, highlightcolor=ROW_BG)
             row.pack(fill="x")
-            label = tk.Label(row, text=f"{item.sf.prefix} · {item.sf.channel}", anchor="w", bg=ROW_BG)
+            text = f"{item.sf.prefix} · {item.sf.channel}"
+            tag = _queue_status_tag(item)
+            if tag:
+                text += f" — {tag}"
+            label = tk.Label(row, text=text, anchor="w", bg=ROW_BG)
             label.pack(side="left", fill="x", expand=True, padx=(6, 4), pady=3)
             for widget in (row, label):
                 widget.bind("<Button-1>", lambda e, fn=item.filename: self._on_queue_row_click(fn, e))
@@ -1609,7 +1634,7 @@ class ReviewPanel(ttk.Frame):
             widgets = self._queue_row_widgets.get(item.filename)
             if widgets is None:
                 continue
-            bg = QUEUE_PROCESSING_BG if item.status == "processing" else ROW_BG
+            bg = _queue_row_bg(item)
             border = QUEUE_SELECTED_BORDER if item.filename in self._queue_selected else bg
             widgets["row"].configure(bg=bg, highlightbackground=border, highlightcolor=border)
             widgets["label"].configure(bg=bg)
@@ -1669,26 +1694,48 @@ class ReviewPanel(ttk.Frame):
     def _queue_move_up(self) -> None:
         filenames = self._selected_queue_filenames()
         if filenames:
-            self.queue.move_up(filenames)
+            server_order = self.queue.move_up(filenames)
             self._refresh_queue_panel()
+            self._push_server_reorder(server_order)
 
     def _queue_move_down(self) -> None:
         filenames = self._selected_queue_filenames()
         if filenames:
-            self.queue.move_down(filenames)
+            server_order = self.queue.move_down(filenames)
             self._refresh_queue_panel()
+            self._push_server_reorder(server_order)
 
     def _queue_send_to_top(self) -> None:
         filenames = self._selected_queue_filenames()
         if filenames:
-            self.queue.send_to_front(filenames)
+            server_order = self.queue.send_to_front(filenames)
             self._refresh_queue_panel()
+            self._push_server_reorder(server_order)
 
     def _queue_send_to_bottom(self) -> None:
         filenames = self._selected_queue_filenames()
         if filenames:
-            self.queue.send_to_back(filenames)
+            server_order = self.queue.send_to_back(filenames)
             self._refresh_queue_panel()
+            self._push_server_reorder(server_order)
+
+    def _push_server_reorder(self, order: list[str]) -> None:
+        """Fire the new order at the server's own reorderable job queue so
+        reordering an already-uploaded file actually changes segmentation
+        order, not just the sidebar's display. Network I/O must never block
+        the Tk main loop (same rule the rescan sweep already follows), so this
+        runs on a daemon thread; reordering is idempotent and low-frequency
+        (a button click), so it's fired unconditionally rather than diffed
+        against the previous order."""
+        if not order:
+            return
+        threading.Thread(target=self._do_push_server_reorder, args=(order,), daemon=True).start()
+
+    def _do_push_server_reorder(self, order: list[str]) -> None:
+        try:
+            self.client.reorder_jobs(order)
+        except Exception as exc:  # noqa: BLE001 — best-effort UX nicety, never fatal
+            self.after(0, self.statusbar.set_message, f"Couldn't reorder server queue: {exc}")
 
     # ------------------------------------------------------------------ #
     # Export (File > Export Data...)

@@ -147,3 +147,13 @@ def get_job(job_id: str, _user: str = Depends(require_auth)) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail=f"unknown job_id {job_id!r}")
     return job
+
+
+class ReorderJobsRequest(BaseModel):
+    order: list[str]
+
+
+@app.post("/jobs/reorder")
+def reorder_jobs(req: ReorderJobsRequest, _user: str = Depends(require_auth)) -> dict:
+    jobs.reorder(req.order)
+    return {"ok": True}

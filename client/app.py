@@ -456,6 +456,12 @@ class CellCountsApp(tk.Tk):
         if resumed:
             self.ui_log(f"Resuming {len(resumed)} job(s) already in progress from a previous session.")
         pending_polls: list[tuple[ScannedFile, str, str]] = list(resumed)
+        # Resumed jobs are already past the upload phase but never went through
+        # pop_next()/finish_upload() this session -- track them explicitly so
+        # they're visible/reorderable in the sidebar too, not just newly
+        # uploaded files.
+        for sf, file_hash, job_id in resumed:
+            queue.track_server_job(sf, file_hash, job_id)
 
         n_ok = n_err = 0
         uploaded = 0
@@ -474,12 +480,12 @@ class CellCountsApp(tk.Tk):
                 )
                 manifest.record_submitted(sf.path.name, sf.prefix, sf.channel, file_hash, job_id)
                 pending_polls.append((sf, file_hash, job_id))
+                queue.finish_upload(item, job_id)
             except ApiError as exc:
                 manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, str(exc))
                 self.ui_log(f"ERROR uploading {sf.path.name}: {exc}")
                 n_err += 1
-            finally:
-                queue.complete(item)
+                queue.remove(item.filename)
 
         if pending_polls:
             self.ui_log(f"{len(pending_polls)} file(s) queued on the server — segmentation continues "
@@ -489,7 +495,7 @@ class CellCountsApp(tk.Tk):
         # server to keep working — this is purely pulling results back down.
         for sf, file_hash, job_id in pending_polls:
             try:
-                result = self._poll_with_resubmit(sf, file_hash, job_id)
+                result = self._poll_with_resubmit(sf, file_hash, job_id, queue)
                 manifest.record_result(
                     sf.path.name, sf.prefix, sf.channel, file_hash,
                     result["width"], result["height"], result["params"], result["cells"],
@@ -502,29 +508,38 @@ class CellCountsApp(tk.Tk):
                 manifest.record_error(sf.path.name, sf.prefix, sf.channel, file_hash, str(exc))
                 self.ui_log(f"ERROR processing {sf.path.name}: {exc}")
                 n_err += 1
+            finally:
+                # Leaves the sidebar exactly when the manifest entry becomes
+                # authoritative (done or error) -- never before.
+                queue.remove(sf.path.name)
 
         self.ui_light("connected" if n_err == 0 else "error")
         self.ui_status(f"Done. {n_ok} processed, {n_err} failed, {up_to_date} already up to date.")
         self.ui_log(f"Finished: {n_ok} processed, {n_err} failed.")
 
-    def _poll_with_resubmit(self, sf: ScannedFile, file_hash: str, job_id: str) -> dict:
+    def _poll_with_resubmit(self, sf: ScannedFile, file_hash: str, job_id: str,
+                             queue: ProcessingQueue) -> dict:
         """Poll `job_id`; if the server has no record of it (status_code 404 —
         e.g. it was redeployed/restarted since the job was submitted and its
         SQLite job history didn't carry over), fall back to a fresh upload once
         rather than failing the file outright."""
         label = sf.path.name
+
+        def on_tick(job, label=label):
+            self.ui_status(f"{job['status'].title()}: {label}")
+            queue.update_server_status(label, job["status"])
+
         self.ui_status(f"Waiting for server to process {label}...")
         try:
-            return self.client.poll_job(
-                job_id, on_tick=lambda job, label=label: self.ui_status(f"{job['status'].title()}: {label}"))
+            return self.client.poll_job(job_id, on_tick=on_tick)
         except ApiError as exc:
             if exc.status_code != 404:
                 raise
             self.ui_log(f"{label}: server no longer knows this job (likely restarted) — re-uploading.")
             new_job_id = self.client.upload_file(sf.path, file_hash)
+            queue.update_job_id(label, new_job_id)
             self.ui_status(f"Waiting for server to process {label}...")
-            return self.client.poll_job(
-                new_job_id, on_tick=lambda job, label=label: self.ui_status(f"{job['status'].title()}: {label}"))
+            return self.client.poll_job(new_job_id, on_tick=on_tick)
 
 
 def main(argv=None) -> int:
