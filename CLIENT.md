@@ -108,9 +108,9 @@ Review** to come back).
   - plain (matches the row background) — waiting its turn, either not yet
     uploaded or already uploaded and waiting on the server's GPU.
   - lavender — uploaded, sitting in the server's queue waiting for the GPU.
-  - **breathing amber** (fading in and out) — happening *right now*, either
-    uploading or actively segmenting. At most one of each at a time, so you
-    may see two rows breathing together.
+  - **breathing amber** (slowly fading in and out) — uploading right now.
+  - **breathing green** (slowly fading in and out) — actively segmenting on
+    the server right now.
   Click a row to select it; Ctrl-click to add/remove individual files from the
   selection; Shift-click to select a whole range — the standard paradigm.
   Four buttons reorder the selection: **▲** (up one), **▼** (down one), **▲▲**
@@ -126,7 +126,12 @@ Review** to come back).
   outstanding at all, the button reads **Inactive** and is grayed out —
   there's nothing for it to start or stop. Your queue order and
   paused/running state are saved per folder and restored next time you open
-  it, same as everything else below.
+  it, same as everything else below. **Process > Stop Uploads** / **Process
+  > Stop Segmenting** (menu bar) control the same two mechanisms
+  independently, if you want to stop only one half of the pipeline instead of
+  both — each one flips to **Start Uploads**/**Start Segmenting** once
+  clicked, same label-swap idea as this button, and clicking either one there
+  or Start/Stop here keeps everything in sync.
 - **Mode** (top left: Review / Draw / Delete / Rescan):
   - **Review** — click a cell to toggle it between kept and not-a-cell; drag a
     rectangle to select several at once and mark them all together.

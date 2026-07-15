@@ -59,19 +59,21 @@ ROW_BG_SELECTED = "#cce0ff"
 # Queue rows carry their status purely through color -- no text label -- so each
 # of the four states in a file's post-scan lifecycle gets its own look:
 #   local queued (waiting to upload)   -> ROW_BG, static
-#   local uploading (active)           -> ROW_BG breathing toward QUEUE_ACTIVE_BG
+#   local uploading (active)           -> ROW_BG breathing toward QUEUE_UPLOADING_ACTIVE_BG (amber)
 #   server queued (waiting on the GPU) -> QUEUE_SERVER_QUEUED_BG, static
-#   server processing (active)         -> QUEUE_SERVER_QUEUED_BG breathing toward QUEUE_ACTIVE_BG
+#   server processing (active)         -> QUEUE_SERVER_QUEUED_BG breathing toward QUEUE_SEGMENTING_ACTIVE_BG (green)
 # so the resting color says *which phase* a file is in and the breathing (see
 # _queue_row_current_bg/_sync_queue_breathing) says *is it happening right now*
-# -- composing the two rather than needing four unrelated colors. Border color
-# marks selection via an outline instead of a fill, so it layers on top of
-# whatever the row's current fill (static or mid-breath) is cleanly.
-QUEUE_ACTIVE_BG = "#fff2cc"
+# -- composing the two, and uploading/segmenting breathe toward different
+# colors so the two kinds of "active" stay visually distinct too. Border
+# color marks selection via an outline instead of a fill, so it layers on
+# top of whatever the row's current fill (static or mid-breath) is cleanly.
+QUEUE_UPLOADING_ACTIVE_BG = "#fff2cc"
+QUEUE_SEGMENTING_ACTIVE_BG = "#b7e6b0"
 QUEUE_SERVER_QUEUED_BG = "#e2e6f5"
 QUEUE_SELECTED_BORDER = "#2980b9"
 QUEUE_BREATHE_MS = 60          # animation tick interval
-QUEUE_BREATHE_PERIOD_S = 1.6   # one full fade-in/fade-out cycle
+QUEUE_BREATHE_PERIOD_S = 3.2   # one full fade-in/fade-out cycle
 
 
 def _queue_row_is_active(item) -> bool:
@@ -79,6 +81,12 @@ def _queue_row_is_active(item) -> bool:
     one local upload and one server-side segmentation at a time, but both
     can be active simultaneously."""
     return item.status in ("uploading", "processing")
+
+
+def _queue_row_active_target_bg(item) -> str:
+    """The color an active row breathes *toward* -- amber for uploading,
+    green for segmenting, so the two read as different things happening."""
+    return QUEUE_SEGMENTING_ACTIVE_BG if item.status == "processing" else QUEUE_UPLOADING_ACTIVE_BG
 
 
 def _queue_row_base_bg(item) -> str:
@@ -372,13 +380,20 @@ class _RescanConfigDialog(tk.Toplevel):
 
 class ReviewPanel(ttk.Frame):
     def __init__(self, parent, folder: Path, manifest: Manifest, statusbar,
-                 recognized: list[ScannedFile], queue: ProcessingQueue, client: ApiClient):
+                 recognized: list[ScannedFile], queue: ProcessingQueue, client: ApiClient,
+                 pause_uploads_var: tk.BooleanVar, pause_segmenting_var: tk.BooleanVar):
         super().__init__(parent)
         self.folder = folder
         self.manifest = manifest
         self.statusbar = statusbar
         self.recognized = recognized
         self.queue = queue
+        # Shared with CellCountsApp's Process menu (Stop/Start Uploads,
+        # Stop/Start Segmenting) -- the sidebar's combined Start/Stop button
+        # below writes to the same two Vars, so either control staying in sync
+        # with the other is automatic, not something either side polls for.
+        self.pause_uploads_var = pause_uploads_var
+        self.pause_segmenting_var = pause_segmenting_var
         self.client = client
 
         self.image_cache = imaging.DisplayImageCache()
@@ -457,7 +472,16 @@ class ReviewPanel(ttk.Frame):
         self._bind_canvas_events()
         self._bind_global_keys()
         self._populate_sample_rows()
-        self._select_initial_image()
+        # Deferred, not called directly: at this point in construction the
+        # panel itself hasn't been packed into the window yet (app.py's
+        # _show_review_panel packs it right after this constructor returns),
+        # so the canvas has never been through a geometry pass and
+        # winfo_width()/winfo_height() would still report Tk's unrealized
+        # placeholder size -- the fit-to-window calculation would size the
+        # very first image against a bogus ~100x100 viewport instead of the
+        # real one. after_idle runs this once Tk's pending layout work
+        # (including that pack()) has actually happened.
+        self.after_idle(self._select_initial_image)
         self._schedule_flush_check()
         self._schedule_queue_poll()
 
@@ -1665,7 +1689,8 @@ class ReviewPanel(ttk.Frame):
         base = _queue_row_base_bg(item)
         if not _queue_row_is_active(item):
             return base
-        return _lerp_color(base, QUEUE_ACTIVE_BG, _breathe_phase(self._queue_breathe_elapsed))
+        target = _queue_row_active_target_bg(item)
+        return _lerp_color(base, target, _breathe_phase(self._queue_breathe_elapsed))
 
     def _refresh_queue_row_styles(self) -> None:
         for item in self._queue_display_items:
@@ -1752,15 +1777,23 @@ class ReviewPanel(ttk.Frame):
         # Pauses/resumes both halves of the pipeline together: the local
         # upload loop (queue.stop/start, unaffected files already mid-upload
         # or mid-segmentation) and the server's dispatch of any job that
-        # hasn't started running yet (client.pause_jobs/resume_jobs) -- from
-        # the reviewer's point of view this is one "pause processing" switch,
-        # not two independent ones.
+        # hasn't started running yet (client.pause_jobs/resume_jobs) -- a
+        # convenience for "pause everything" in one click. CellCountsApp's
+        # Process menu (Stop/Start Uploads, Stop/Start Segmenting) exposes
+        # the same two mechanisms independently; setting pause_uploads_var/
+        # pause_segmenting_var here (shared Var objects, not a copy) is what
+        # keeps that menu's label showing the truth after this button
+        # changes it (app.py traces both Vars to update the label text).
         if self.queue.is_running:
             self.queue.stop()
             self._push_server_pause(True)
+            self.pause_uploads_var.set(True)
+            self.pause_segmenting_var.set(True)
         else:
             self.queue.start()
             self._push_server_pause(False)
+            self.pause_uploads_var.set(False)
+            self.pause_segmenting_var.set(False)
         self._refresh_queue_panel()
 
     def _push_server_pause(self, pause: bool) -> None:

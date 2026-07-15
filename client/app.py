@@ -37,6 +37,11 @@ from statusbar import StatusBar
 from ws_client import JobEventsClient
 
 DEFAULT_SERVER_URL = os.environ.get("CELLCOUNTS_SERVER_URL", "")
+# Fixed positions of the Process menu's two entries -- entryconfig by label
+# stops working once the label itself has been changed (see _build_menu),
+# so every reference to these entries goes through the index instead.
+PROCESSMENU_UPLOADS_INDEX = 0
+PROCESSMENU_SEGMENTING_INDEX = 1
 
 
 class LoginDialog(tk.Toplevel):
@@ -152,6 +157,13 @@ class CellCountsApp(tk.Tk):
         # "needs processing" before either records anything.
         self._active_processing_folders: set[Path] = set()
 
+        # Shared with ReviewPanel (passed into its constructor) so the
+        # Process menu here and the sidebar's combined Start/Stop button stay
+        # in sync for free -- both surfaces read/write the same two Vars
+        # instead of needing an explicit sync step.
+        self.pause_uploads_var = tk.BooleanVar(value=False)
+        self.pause_segmenting_var = tk.BooleanVar(value=False)
+
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(200, self._startup)
@@ -191,6 +203,27 @@ class CellCountsApp(tk.Tk):
         self.viewmenu.add_command(label="Show Log", command=self._show_log)
         self.viewmenu.add_command(label="Show Review", command=self._show_review, state="disabled")
         menubar.add_cascade(label="View", menu=self.viewmenu)
+
+        # Independent counterparts to the sidebar's combined Start/Stop button
+        # (review.py's _toggle_queue_running) -- same two underlying
+        # mechanisms (queue.stop/start for uploads, client.pause_jobs/
+        # resume_jobs for segmentation), just controllable separately. Plain
+        # commands whose *label* swaps Stop<->Start (not checkbuttons -- a
+        # checkmark would say less at a glance than the label itself naming
+        # the action a click performs), referenced by the fixed indices below
+        # (PROCESSMENU_UPLOADS_INDEX/_SEGMENTING_INDEX) since entryconfig by
+        # label stops working once the label's been changed once. A trace on
+        # each Var (not a call at every mutation site) is what keeps the
+        # label right regardless of whether the change came from here or
+        # from the sidebar button -- both write to the same two Vars.
+        self.processmenu = tk.Menu(menubar, tearoff=0)
+        self.processmenu.add_command(label="Stop Uploads", command=self._on_pause_uploads_toggle,
+                                      state="disabled")
+        self.processmenu.add_command(label="Stop Segmenting", command=self._on_pause_segmenting_toggle,
+                                      state="disabled")
+        menubar.add_cascade(label="Process", menu=self.processmenu)
+        self.pause_uploads_var.trace_add("write", self._sync_pause_uploads_label)
+        self.pause_segmenting_var.trace_add("write", self._sync_pause_segmenting_label)
 
         self.config(menu=menubar)
         self.bind("<Control-o>", lambda e: self._open_folder_clicked())
@@ -308,10 +341,48 @@ class CellCountsApp(tk.Tk):
             self.review_panel.destroy()
         self.manifest = manifest
         self.review_panel = ReviewPanel(self.content_frame, self.folder, manifest, self.statusbar,
-                                         recognized, queue, self.client)
+                                         recognized, queue, self.client,
+                                         self.pause_uploads_var, self.pause_segmenting_var)
         self.viewmenu.entryconfig("Show Review", state="normal")
         self.filemenu.entryconfig("Export Data...", state="normal")
+        self.processmenu.entryconfig(PROCESSMENU_UPLOADS_INDEX, state="normal")
+        self.processmenu.entryconfig(PROCESSMENU_SEGMENTING_INDEX, state="normal")
         self._show_review()
+
+    def _sync_pause_uploads_label(self, *_args) -> None:
+        label = "Start Uploads" if self.pause_uploads_var.get() else "Stop Uploads"
+        self.processmenu.entryconfig(PROCESSMENU_UPLOADS_INDEX, label=label)
+
+    def _sync_pause_segmenting_label(self, *_args) -> None:
+        label = "Start Segmenting" if self.pause_segmenting_var.get() else "Stop Segmenting"
+        self.processmenu.entryconfig(PROCESSMENU_SEGMENTING_INDEX, label=label)
+
+    def _on_pause_uploads_toggle(self) -> None:
+        if self.queue is None:
+            return
+        pause = not self.pause_uploads_var.get()
+        self.pause_uploads_var.set(pause)
+        if pause:
+            self.queue.stop()
+        else:
+            self.queue.start()
+
+    def _on_pause_segmenting_toggle(self) -> None:
+        if self.client is None:
+            return
+        pause = not self.pause_segmenting_var.get()
+        self.pause_segmenting_var.set(pause)
+        threading.Thread(target=self._do_pause_segmenting, args=(pause,), daemon=True).start()
+
+    def _do_pause_segmenting(self, pause: bool) -> None:
+        try:
+            if pause:
+                self.client.pause_jobs()
+            else:
+                self.client.resume_jobs()
+        except ApiError as exc:
+            verb = "pause" if pause else "resume"
+            self.ui_log(f"Couldn't {verb} server segmentation: {exc}")
 
     def _export_data_clicked(self) -> None:
         if self.review_panel is not None:
@@ -452,6 +523,7 @@ class CellCountsApp(tk.Tk):
                 to_process.sort(key=lambda item: order_index.get(item.filename, len(order_index)))
                 if not persisted.get("running", True):
                     queue.stop()
+                    self.after(0, self.pause_uploads_var.set, True)
             queue.enqueue(to_process)
 
         # Uploading proceeds as before (one file at a time, queue-ordered), but
