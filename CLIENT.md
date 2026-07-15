@@ -100,25 +100,33 @@ Review** to come back).
   population these are measured against), and the coexpression rate. This tab is
   view-only — Review/Draw/Delete are disabled while it's open, since editing
   always happens on one real channel, never on this derived view.
-- **Queue** (left, bottom) — the files still waiting to be *uploaded*, in the
-  order they'll go, styled the same as the Samples list above it. This is
-  upload order, not segmentation order — a file drops off this list as soon as
-  it's finished uploading, even though it may still take a while to actually
-  segment on the server (watch the readiness dots for that). Click to select
-  one; Ctrl-click to add/remove individual files from the selection;
-  Shift-click to select a whole range — the standard paradigm. The row
-  currently uploading is tinted amber rather than labeled — it also can't be
-  reordered or reprioritized past. Four buttons reorder the selection: **▲** (up
-  one), **▼** (down one), **▲▲** (send to top), **▼▼** (send to bottom). A
-  multi-selection moves as a block — the items you selected keep their order
-  relative to each other, they just all shift together. **Start/Stop** pauses
-  and resumes uploading; Stop finishes whatever file is already mid-upload
-  before pausing. It has no effect on files already uploaded — those keep
-  segmenting on the server regardless. When there's nothing queued or
-  uploading, the button reads **Inactive** and is grayed out — there's nothing
-  for it to start or
-  stop. Your queue order and paused/running state are saved per folder and
-  restored next time you open it, same as everything else below.
+- **Queue** (left, bottom) — every file still outstanding, from "waiting to
+  upload" all the way through "segmenting on the server," styled the same as
+  the Samples list above it and in true processing order (segmenting now →
+  queued on the server → uploading now → waiting to upload). Status is shown
+  purely by color, no text label:
+  - plain (matches the row background) — waiting its turn, either not yet
+    uploaded or already uploaded and waiting on the server's GPU.
+  - lavender — uploaded, sitting in the server's queue waiting for the GPU.
+  - **breathing amber** (fading in and out) — happening *right now*, either
+    uploading or actively segmenting. At most one of each at a time, so you
+    may see two rows breathing together.
+  Click a row to select it; Ctrl-click to add/remove individual files from the
+  selection; Shift-click to select a whole range — the standard paradigm.
+  Four buttons reorder the selection: **▲** (up one), **▼** (down one), **▲▲**
+  (send to top), **▼▼** (send to bottom). A multi-selection moves as a block —
+  the items you selected keep their order relative to each other, they just
+  all shift together. Reordering a file that's already uploaded (and
+  reorderable — anything actively breathing can't be) pushes the new order to
+  the server too, so it actually changes segmentation order, not just what
+  this list shows. **Start/Stop** pauses and resumes the whole pipeline: no
+  new uploads start, and the server won't start segmenting anything that
+  hasn't started yet — whatever's currently uploading or currently
+  segmenting finishes completely unaffected either way. When there's nothing
+  outstanding at all, the button reads **Inactive** and is grayed out —
+  there's nothing for it to start or stop. Your queue order and
+  paused/running state are saved per folder and restored next time you open
+  it, same as everything else below.
 - **Mode** (top left: Review / Draw / Delete / Rescan):
   - **Review** — click a cell to toggle it between kept and not-a-cell; drag a
     rectangle to select several at once and mark them all together.

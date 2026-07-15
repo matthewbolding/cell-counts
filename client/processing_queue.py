@@ -34,10 +34,16 @@ server-phase job_id order, so the caller can push it to the server's own
 reorderable queue (`ApiClient.reorder_jobs`) — local-only reorders never touch
 the network.
 
-Stop only prevents *starting the next upload* — `pop_next()` only checks the
-resume event between items, never interrupts an in-flight upload/poll, and has
-no bearing on jobs already sitting server-side. There's no server-side job-cancel
-endpoint, so pausing mid-item isn't a safe option.
+Stop, as far as *this module* is concerned, only prevents *starting the next
+upload* — `pop_next()` only checks the resume event between items, never
+interrupts an in-flight upload, and has no bearing on jobs already sitting
+server-side. The reviewer-facing Stop/Start button (review.py's
+`_toggle_queue_running`) pairs this with a *separate* call to the server's own
+`/jobs/pause`/`/jobs/resume` (see `server/jobs.py`'s `_ReorderableQueue.pause`)
+so the visible effect is "nothing new starts, anywhere" — this module's half
+only ever covers the local upload loop. There's no server-side job-*cancel*
+endpoint, so pausing mid-item (upload or segmentation) isn't a safe option
+either side of that split.
 
 Persistence: if constructed with `persist_path`, the queue's order and running
 state are written to that file (atomically, best-effort) after every mutation, and

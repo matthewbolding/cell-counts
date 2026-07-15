@@ -12,6 +12,7 @@ you've panned, since this panel already tracks pan itself.
 
 from __future__ import annotations
 
+import math
 import shutil
 import tempfile
 import threading
@@ -55,32 +56,53 @@ DOT_COLORS = {
 }
 ROW_BG = "#f0f0f0"
 ROW_BG_SELECTED = "#cce0ff"
-# Queue rows use the same base look as Samples rows (ROW_BG/ROW_BG_SELECTED) plus
-# a few of their own: a fill for "this file is being actively worked on right
-# now" (uploading, or segmenting on the GPU -- kept distinct from the blue
-# selection color so a row that's both selected and in-flight doesn't read as
-# ambiguous), a muted fill for "already uploaded, waiting its turn server-side"
-# (committed but not yet running), and a border color that marks selection via
-# an outline instead of a fill, so it layers on top of either fill cleanly.
-QUEUE_PROCESSING_BG = "#fff2cc"
+# Queue rows carry their status purely through color -- no text label -- so each
+# of the four states in a file's post-scan lifecycle gets its own look:
+#   local queued (waiting to upload)   -> ROW_BG, static
+#   local uploading (active)           -> ROW_BG breathing toward QUEUE_ACTIVE_BG
+#   server queued (waiting on the GPU) -> QUEUE_SERVER_QUEUED_BG, static
+#   server processing (active)         -> QUEUE_SERVER_QUEUED_BG breathing toward QUEUE_ACTIVE_BG
+# so the resting color says *which phase* a file is in and the breathing (see
+# _queue_row_current_bg/_sync_queue_breathing) says *is it happening right now*
+# -- composing the two rather than needing four unrelated colors. Border color
+# marks selection via an outline instead of a fill, so it layers on top of
+# whatever the row's current fill (static or mid-breath) is cleanly.
+QUEUE_ACTIVE_BG = "#fff2cc"
 QUEUE_SERVER_QUEUED_BG = "#e2e6f5"
 QUEUE_SELECTED_BORDER = "#2980b9"
+QUEUE_BREATHE_MS = 60          # animation tick interval
+QUEUE_BREATHE_PERIOD_S = 1.6   # one full fade-in/fade-out cycle
 
 
-def _queue_status_tag(item) -> str:
-    """Short suffix for a Queue row's label -- blank for the common "just
-    waiting to upload" case (matches the panel's original plain look)."""
-    if item.job_id is None:
-        return "uploading" if item.status == "uploading" else ""
-    return "segmenting" if item.status == "processing" else "queued for inference"
+def _queue_row_is_active(item) -> bool:
+    """True for whichever row(s) are happening right this moment -- at most
+    one local upload and one server-side segmentation at a time, but both
+    can be active simultaneously."""
+    return item.status in ("uploading", "processing")
 
 
-def _queue_row_bg(item) -> str:
-    if item.status in ("uploading", "processing"):
-        return QUEUE_PROCESSING_BG  # actively happening right now
-    if item.job_id is not None:
-        return QUEUE_SERVER_QUEUED_BG  # committed server-side, waiting its turn
-    return ROW_BG  # still waiting locally, untouched
+def _queue_row_base_bg(item) -> str:
+    """The resting color a row sits at -- what it breathes from/back to while
+    active, and what it simply is while not."""
+    return QUEUE_SERVER_QUEUED_BG if item.job_id is not None else ROW_BG
+
+
+def _lerp_color(c1: str, c2: str, t: float) -> str:
+    """t in [0, 1]; c1/c2 are '#rrggbb' strings."""
+    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    r = round(r1 + (r2 - r1) * t)
+    g = round(g1 + (g2 - g1) * t)
+    b = round(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _breathe_phase(elapsed_s: float) -> float:
+    """Smooth 0 -> 1 -> 0 oscillation (not a linear ping-pong) -- eased in/out
+    the way an actual breathing rhythm looks, rather than snapping."""
+    return (1 - math.cos(2 * math.pi * elapsed_s / QUEUE_BREATHE_PERIOD_S)) / 2
+
+
 # ttk.Scrollbar's default theme renders near-white on some platforms, which
 # disappears against the light widgets it sits next to — plain tk.Scrollbar with
 # explicit colors instead, for one that's actually visible everywhere.
@@ -370,6 +392,13 @@ class ReviewPanel(ttk.Frame):
         self._queue_selected: set[str] = set()
         self._queue_last_clicked: str | None = None
         self._known_done: set[str] = set()
+        # "Breathing" fade animation for whichever row(s) are actively
+        # happening right now (uploading, or segmenting on the server) --
+        # only ticks while at least one such row exists, see
+        # _sync_queue_breathing.
+        self._queue_breathe_after_id: str | None = None
+        self._queue_breathe_start = 0.0
+        self._queue_breathe_elapsed = 0.0
 
         self.current_prefix: str | None = None
         self.current_channel: str | None = None
@@ -1109,9 +1138,16 @@ class ReviewPanel(ttk.Frame):
         return max(self.canvas.winfo_width(), 100), max(self.canvas.winfo_height(), 100)
 
     def _fit_scale_for(self, display_array) -> float:
+        """Scale that fits the whole image inside the viewport with nothing cut
+        off -- the smaller of the two axis ratios is what's limiting, i.e. the
+        image's longest side (relative to the viewport) spans the window and
+        the other side letterboxes. Picking based on the image's own aspect
+        ratio instead of `min()` (the previous, buggy version) only happened
+        to work when the canvas's aspect ratio matched a particular relation
+        to the image's; for most window shapes it overflowed one axis."""
         img_h, img_w = display_array.shape
         vw, vh = self._canvas_size()
-        return vw / img_w if img_h >= img_w else vh / img_h
+        return min(vw / img_w, vh / img_h)
 
     def _center_on(self, display_array) -> None:
         img_h, img_w = display_array.shape
@@ -1581,12 +1617,10 @@ class ReviewPanel(ttk.Frame):
 
     def _refresh_queue_panel(self) -> None:
         snap = self.queue.snapshot()
-        # Start/Stop only ever pauses local uploads (see processing_queue.py's
-        # module docstring) -- gate it on whether any local-phase item remains,
-        # not on the queue being empty, since server-phase items (already
-        # uploaded, waiting/running on the GPU) leave nothing for a click here
-        # to act on.
-        if not any(it.job_id is None for it in snap.items):
+        # Stop pauses both the local upload loop and the server's dispatch of
+        # not-yet-started jobs (see _toggle_queue_running) -- meaningful
+        # whenever anything at all is still outstanding, local or server-phase.
+        if not snap.items:
             self.queue_toggle_btn.configure(text="Inactive", state="disabled")
         else:
             self.queue_toggle_btn.configure(text=("Stop" if snap.running else "Start"), state="normal")
@@ -1618,9 +1652,6 @@ class ReviewPanel(ttk.Frame):
                             highlightbackground=ROW_BG, highlightcolor=ROW_BG)
             row.pack(fill="x")
             text = f"{item.sf.prefix} · {item.sf.channel}"
-            tag = _queue_status_tag(item)
-            if tag:
-                text += f" — {tag}"
             label = tk.Label(row, text=text, anchor="w", bg=ROW_BG)
             label.pack(side="left", fill="x", expand=True, padx=(6, 4), pady=3)
             for widget in (row, label):
@@ -1628,16 +1659,49 @@ class ReviewPanel(ttk.Frame):
                 self._bind_wheel_scroll(widget, self.queue_canvas)
             self._queue_row_widgets[item.filename] = {"row": row, "label": label}
         self._refresh_queue_row_styles()
+        self._sync_queue_breathing()
+
+    def _queue_row_current_bg(self, item) -> str:
+        base = _queue_row_base_bg(item)
+        if not _queue_row_is_active(item):
+            return base
+        return _lerp_color(base, QUEUE_ACTIVE_BG, _breathe_phase(self._queue_breathe_elapsed))
 
     def _refresh_queue_row_styles(self) -> None:
         for item in self._queue_display_items:
             widgets = self._queue_row_widgets.get(item.filename)
             if widgets is None:
                 continue
-            bg = _queue_row_bg(item)
+            bg = self._queue_row_current_bg(item)
             border = QUEUE_SELECTED_BORDER if item.filename in self._queue_selected else bg
             widgets["row"].configure(bg=bg, highlightbackground=border, highlightcolor=border)
             widgets["label"].configure(bg=bg)
+
+    def _sync_queue_breathing(self) -> None:
+        """Starts/stops the breathing animation loop to match whether any row
+        is currently active -- runs continuously only while something's
+        actually happening, not as a permanent idle timer."""
+        any_active = any(_queue_row_is_active(it) for it in self._queue_display_items)
+        if any_active and self._queue_breathe_after_id is None:
+            self._queue_breathe_start = time.monotonic()
+            self._queue_breathe_tick()
+        elif not any_active and self._queue_breathe_after_id is not None:
+            self.after_cancel(self._queue_breathe_after_id)
+            self._queue_breathe_after_id = None
+
+    def _queue_breathe_tick(self) -> None:
+        self._queue_breathe_elapsed = time.monotonic() - self._queue_breathe_start
+        for item in self._queue_display_items:
+            if not _queue_row_is_active(item):
+                continue
+            widgets = self._queue_row_widgets.get(item.filename)
+            if widgets is None:
+                continue
+            bg = self._queue_row_current_bg(item)
+            border = QUEUE_SELECTED_BORDER if item.filename in self._queue_selected else bg
+            widgets["row"].configure(bg=bg, highlightbackground=border, highlightcolor=border)
+            widgets["label"].configure(bg=bg)
+        self._queue_breathe_after_id = self.after(QUEUE_BREATHE_MS, self._queue_breathe_tick)
 
     def _on_queue_row_click(self, filename: str, event) -> None:
         # Standard multi-select paradigm, hand-rolled since these are plain
@@ -1685,11 +1749,32 @@ class ReviewPanel(ttk.Frame):
         return set(self._queue_selected)
 
     def _toggle_queue_running(self) -> None:
+        # Pauses/resumes both halves of the pipeline together: the local
+        # upload loop (queue.stop/start, unaffected files already mid-upload
+        # or mid-segmentation) and the server's dispatch of any job that
+        # hasn't started running yet (client.pause_jobs/resume_jobs) -- from
+        # the reviewer's point of view this is one "pause processing" switch,
+        # not two independent ones.
         if self.queue.is_running:
             self.queue.stop()
+            self._push_server_pause(True)
         else:
             self.queue.start()
+            self._push_server_pause(False)
         self._refresh_queue_panel()
+
+    def _push_server_pause(self, pause: bool) -> None:
+        threading.Thread(target=self._do_push_server_pause, args=(pause,), daemon=True).start()
+
+    def _do_push_server_pause(self, pause: bool) -> None:
+        try:
+            if pause:
+                self.client.pause_jobs()
+            else:
+                self.client.resume_jobs()
+        except Exception as exc:  # noqa: BLE001 — best-effort UX nicety, never fatal
+            verb = "pause" if pause else "resume"
+            self.after(0, self.statusbar.set_message, f"Couldn't {verb} server queue: {exc}")
 
     def _queue_move_up(self) -> None:
         filenames = self._selected_queue_filenames()
@@ -1785,6 +1870,9 @@ class ReviewPanel(ttk.Frame):
         if self._queue_poll_id is not None:
             self.after_cancel(self._queue_poll_id)
             self._queue_poll_id = None
+        if self._queue_breathe_after_id is not None:
+            self.after_cancel(self._queue_breathe_after_id)
+            self._queue_breathe_after_id = None
         if self.current_filename is not None:
             self._save_ui_state()
         self._flush_current(sync=True)

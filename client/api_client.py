@@ -110,6 +110,16 @@ class ApiClient:
             json={"order": job_ids})
         self._raise_for_status(resp)
 
+    def pause_jobs(self) -> None:
+        """Stop the server from starting any new job -- whatever's already
+        running is unaffected."""
+        resp = self.session.post(self._url("/jobs/pause"), auth=self.auth, timeout=self.timeout)
+        self._raise_for_status(resp)
+
+    def resume_jobs(self) -> None:
+        resp = self.session.post(self._url("/jobs/resume"), auth=self.auth, timeout=self.timeout)
+        self._raise_for_status(resp)
+
     def get_job(self, job_id: str) -> dict[str, Any]:
         """One-shot, non-blocking status check — unlike `poll_job`, returns
         immediately with whatever the job's current status is instead of

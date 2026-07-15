@@ -189,6 +189,18 @@ def reorder_jobs(req: ReorderJobsRequest, _user: str = Depends(require_auth)) ->
     return {"ok": True}
 
 
+@app.post("/jobs/pause")
+def pause_jobs(_user: str = Depends(require_auth)) -> dict:
+    jobs.pause()
+    return {"ok": True}
+
+
+@app.post("/jobs/resume")
+def resume_jobs(_user: str = Depends(require_auth)) -> dict:
+    jobs.resume()
+    return {"ok": True}
+
+
 # --------------------------------------------------------------------------- #
 # Job status push -- one message per status transition (same dict shape as
 # GET /jobs/{id}), broadcast to every connected client. The client sends

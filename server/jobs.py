@@ -13,6 +13,14 @@ task queue would be pure overhead. What does matter, and is easy to get wrong:
   mid-job doesn't turn a client's in-flight poll into a bare 404 — it resolves to an
   explicit "error" status the client can react to (by re-uploading) instead of
   hanging forever.
+
+`pause()`/`resume()` (client-facing: `POST /jobs/pause`/`/jobs/resume`) gate
+`_ReorderableQueue.get()` itself, so "paused" means the worker simply never
+pops another job_id off the queue -- whatever it already popped and is
+running keeps running, completely unaffected, matching what the reviewer's
+Stop/Start button actually promises. Not persisted (like `reorder()`, see
+`_ReorderableQueue`'s own docstring) -- a restart already aborts every
+outstanding job, so there's nothing meaningful to restore a pause into.
 """
 
 from __future__ import annotations
@@ -44,22 +52,43 @@ class _ReorderableQueue:
     not just before. Never touches anything the worker has already popped, and
     isn't persisted anywhere: a server restart already aborts every
     queued/processing job (see `init()` below), so there's nothing to restore.
+
+    `pause()`/`resume()` gate `get()` itself (not just `put()`/scheduling), so
+    the effect is exactly "don't start anything new" -- whatever the worker
+    already popped and is actively running is completely unaffected, and
+    resuming wakes `get()` immediately via the same condition variable rather
+    than leaving it to notice on some poll interval.
     """
 
     def __init__(self) -> None:
         self._items: list[str] = []
         self._cond = threading.Condition()
+        self._running = True
 
     def put(self, job_id: str) -> None:
         with self._cond:
             self._items.append(job_id)
-            self._cond.notify()
+            self._cond.notify_all()
 
     def get(self) -> str:
+        """Block until an item is waiting AND the queue isn't paused."""
         with self._cond:
-            while not self._items:
+            while not (self._items and self._running):
                 self._cond.wait()
             return self._items.pop(0)
+
+    def pause(self) -> None:
+        with self._cond:
+            self._running = False
+
+    def resume(self) -> None:
+        with self._cond:
+            self._running = True
+            self._cond.notify_all()
+
+    def is_running(self) -> bool:
+        with self._cond:
+            return self._running
 
     def reorder(self, order: list[str]) -> None:
         """Re-sort whatever's still waiting to match `order`. job_ids named in
@@ -192,6 +221,20 @@ def reorder(order: list[str]) -> None:
     Queue panel. Best-effort: job_ids the queue no longer recognizes are
     silently ignored (see `_ReorderableQueue.reorder`)."""
     _queue.reorder(order)
+
+
+def pause() -> None:
+    """Stop starting new jobs -- whatever's already running (the worker
+    already popped it) finishes normally and is completely unaffected."""
+    _queue.pause()
+
+
+def resume() -> None:
+    _queue.resume()
+
+
+def is_running() -> bool:
+    return _queue.is_running()
 
 
 def get(job_id: str) -> dict | None:
