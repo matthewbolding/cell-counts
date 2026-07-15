@@ -65,13 +65,14 @@ ROW_BG_SELECTED = "#cce0ff"
 # so the resting color says *which phase* a file is in and the breathing (see
 # _queue_row_current_bg/_sync_queue_breathing) says *is it happening right now*
 # -- composing the two, and uploading/segmenting breathe toward different
-# colors so the two kinds of "active" stay visually distinct too. Border
-# color marks selection via an outline instead of a fill, so it layers on
-# top of whatever the row's current fill (static or mid-breath) is cleanly.
+# colors so the two kinds of "active" stay visually distinct too. Selection
+# is a solid ROW_BG_SELECTED fill across the whole row -- same look as the
+# Samples list above it, not a border/box -- and doubles as the base color a
+# selected+active row breathes from, so breathing and selection compose
+# instead of one having to hide the other.
 QUEUE_UPLOADING_ACTIVE_BG = "#fff2cc"
 QUEUE_SEGMENTING_ACTIVE_BG = "#b7e6b0"
 QUEUE_SERVER_QUEUED_BG = "#e2e6f5"
-QUEUE_SELECTED_BORDER = "#2980b9"
 QUEUE_BREATHE_MS = 60          # animation tick interval
 QUEUE_BREATHE_PERIOD_S = 3.2   # one full fade-in/fade-out cycle
 
@@ -1670,7 +1671,11 @@ class ReviewPanel(ttk.Frame):
         self._sync_queue_breathing()
 
     def _queue_row_current_bg(self, item) -> str:
-        base = _queue_row_base_bg(item)
+        # Selected reads as a solid fill across the whole row, same as the
+        # Samples list above it -- not a border/box -- so it's the "base" a
+        # selected row breathes from/to as well, exactly like an unselected
+        # row breathes from its own base.
+        base = ROW_BG_SELECTED if item.filename in self._queue_selected else _queue_row_base_bg(item)
         if not _queue_row_is_active(item):
             return base
         target = _queue_row_active_target_bg(item)
@@ -1682,8 +1687,7 @@ class ReviewPanel(ttk.Frame):
             if widgets is None:
                 continue
             bg = self._queue_row_current_bg(item)
-            border = QUEUE_SELECTED_BORDER if item.filename in self._queue_selected else bg
-            widgets["row"].configure(bg=bg, highlightbackground=border, highlightcolor=border)
+            widgets["row"].configure(bg=bg, highlightbackground=bg, highlightcolor=bg)
             widgets["label"].configure(bg=bg)
 
     def _sync_queue_breathing(self) -> None:
@@ -1707,17 +1711,19 @@ class ReviewPanel(ttk.Frame):
             if widgets is None:
                 continue
             bg = self._queue_row_current_bg(item)
-            border = QUEUE_SELECTED_BORDER if item.filename in self._queue_selected else bg
-            widgets["row"].configure(bg=bg, highlightbackground=border, highlightcolor=border)
+            widgets["row"].configure(bg=bg, highlightbackground=bg, highlightcolor=bg)
             widgets["label"].configure(bg=bg)
         self._queue_breathe_after_id = self.after(QUEUE_BREATHE_MS, self._queue_breathe_tick)
 
     def _on_queue_row_click(self, filename: str, event) -> None:
         # Standard multi-select paradigm, hand-rolled since these are plain
-        # Frames/Labels, not a native Listbox: plain click selects only this row;
-        # Ctrl-click toggles it in/out of the selection; Shift-click selects the
-        # contiguous range from the last-clicked row to this one. Tk's modifier
-        # bitmask (Shift=0x0001, Control=0x0004) is consistent across platforms.
+        # Frames/Labels, not a native Listbox: plain click selects only this
+        # row (or, if it's already the sole selected row, deselects it --
+        # click again to clear rather than being stuck with one row always
+        # selected); Ctrl-click toggles it in/out of the selection;
+        # Shift-click selects the contiguous range from the last-clicked row
+        # to this one. Tk's modifier bitmask (Shift=0x0001, Control=0x0004)
+        # is consistent across platforms.
         shift = bool(event.state & 0x0001)
         ctrl = bool(event.state & 0x0004)
         order = [item.filename for item in self._queue_display_items]
@@ -1732,6 +1738,9 @@ class ReviewPanel(ttk.Frame):
             else:
                 self._queue_selected.add(filename)
             self._queue_last_clicked = filename
+        elif self._queue_selected == {filename}:
+            self._queue_selected = set()
+            self._queue_last_clicked = None
         else:
             self._queue_selected = {filename}
             self._queue_last_clicked = filename
