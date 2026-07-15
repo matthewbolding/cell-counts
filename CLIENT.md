@@ -119,19 +119,14 @@ Review** to come back).
   all shift together. Reordering a file that's already uploaded (and
   reorderable — anything actively breathing can't be) pushes the new order to
   the server too, so it actually changes segmentation order, not just what
-  this list shows. **Start/Stop** pauses and resumes the whole pipeline: no
-  new uploads start, and the server won't start segmenting anything that
-  hasn't started yet — whatever's currently uploading or currently
-  segmenting finishes completely unaffected either way. When there's nothing
-  outstanding at all, the button reads **Inactive** and is grayed out —
-  there's nothing for it to start or stop. Your queue order and
-  paused/running state are saved per folder and restored next time you open
-  it, same as everything else below. **Process > Stop Uploads** / **Process
-  > Stop Segmenting** (menu bar) control the same two mechanisms
-  independently, if you want to stop only one half of the pipeline instead of
-  both — each one flips to **Start Uploads**/**Start Segmenting** once
-  clicked, same label-swap idea as this button, and clicking either one there
-  or Start/Stop here keeps everything in sync.
+  this list shows. Your queue order and paused/running state are saved per
+  folder and restored next time you open it, same as everything else below.
+  **Process > Stop Uploads** / **Process > Stop Segmenting** (menu bar)
+  pause the two halves of the pipeline independently — no new uploads start,
+  or the server won't start segmenting anything that hasn't started yet,
+  respectively — without affecting whatever's already uploading or already
+  segmenting either way. Each one flips to **Start Uploads**/**Start
+  Segmenting** once clicked, to resume that half again.
 - **Mode** (top left: Review / Draw / Delete / Rescan):
   - **Review** — click a cell to toggle it between kept and not-a-cell; drag a
     rectangle to select several at once and mark them all together.

@@ -380,20 +380,13 @@ class _RescanConfigDialog(tk.Toplevel):
 
 class ReviewPanel(ttk.Frame):
     def __init__(self, parent, folder: Path, manifest: Manifest, statusbar,
-                 recognized: list[ScannedFile], queue: ProcessingQueue, client: ApiClient,
-                 pause_uploads_var: tk.BooleanVar, pause_segmenting_var: tk.BooleanVar):
+                 recognized: list[ScannedFile], queue: ProcessingQueue, client: ApiClient):
         super().__init__(parent)
         self.folder = folder
         self.manifest = manifest
         self.statusbar = statusbar
         self.recognized = recognized
         self.queue = queue
-        # Shared with CellCountsApp's Process menu (Stop/Start Uploads,
-        # Stop/Start Segmenting) -- the sidebar's combined Start/Stop button
-        # below writes to the same two Vars, so either control staying in sync
-        # with the other is automatic, not something either side polls for.
-        self.pause_uploads_var = pause_uploads_var
-        self.pause_segmenting_var = pause_segmenting_var
         self.client = client
 
         self.image_cache = imaging.DisplayImageCache()
@@ -565,16 +558,15 @@ class ReviewPanel(ttk.Frame):
         self._bind_wheel_scroll(self.sample_canvas, self.sample_canvas)
         pane.add(samples_outer, weight=2)
 
-        # --- Queue (bottom pane): pending work, Start/Stop, and reorder controls.
-        # Same scrollable-custom-rows idiom as Samples above (not a plain Listbox)
-        # so the two panels look and feel like one consistent design.
+        # --- Queue (bottom pane): pending work and reorder controls. Pausing
+        # lives in the Process menu now (Stop/Start Uploads, Stop/Start
+        # Segmenting -- see app.py), not a button here. Same scrollable-
+        # custom-rows idiom as Samples above (not a plain Listbox) so the two
+        # panels look and feel like one consistent design.
         queue_outer = ttk.Frame(pane)
         queue_header = ttk.Frame(queue_outer)
         queue_header.pack(fill="x", padx=8, pady=(8, 2))
         ttk.Label(queue_header, text="Queue", font=("", 10, "bold")).pack(side="left")
-        self.queue_toggle_btn = ttk.Button(queue_header, text="Inactive", width=8,
-                                            state="disabled", command=self._toggle_queue_running)
-        self.queue_toggle_btn.pack(side="right")
 
         queue_wrap = ttk.Frame(queue_outer)
         queue_wrap.pack(fill="both", expand=True, padx=8, pady=(0, 4))
@@ -1641,14 +1633,6 @@ class ReviewPanel(ttk.Frame):
 
     def _refresh_queue_panel(self) -> None:
         snap = self.queue.snapshot()
-        # Stop pauses both the local upload loop and the server's dispatch of
-        # not-yet-started jobs (see _toggle_queue_running) -- meaningful
-        # whenever anything at all is still outstanding, local or server-phase.
-        if not snap.items:
-            self.queue_toggle_btn.configure(text="Inactive", state="disabled")
-        else:
-            self.queue_toggle_btn.configure(text=("Stop" if snap.running else "Start"), state="normal")
-
         signature = [(it.filename, it.status, it.job_id) for it in snap.items]
         if signature == self._queue_display_signature:
             # Nothing actually changed since the last poll — leave the rows
@@ -1772,42 +1756,6 @@ class ReviewPanel(ttk.Frame):
 
     def _selected_queue_filenames(self) -> set[str]:
         return set(self._queue_selected)
-
-    def _toggle_queue_running(self) -> None:
-        # Pauses/resumes both halves of the pipeline together: the local
-        # upload loop (queue.stop/start, unaffected files already mid-upload
-        # or mid-segmentation) and the server's dispatch of any job that
-        # hasn't started running yet (client.pause_jobs/resume_jobs) -- a
-        # convenience for "pause everything" in one click. CellCountsApp's
-        # Process menu (Stop/Start Uploads, Stop/Start Segmenting) exposes
-        # the same two mechanisms independently; setting pause_uploads_var/
-        # pause_segmenting_var here (shared Var objects, not a copy) is what
-        # keeps that menu's label showing the truth after this button
-        # changes it (app.py traces both Vars to update the label text).
-        if self.queue.is_running:
-            self.queue.stop()
-            self._push_server_pause(True)
-            self.pause_uploads_var.set(True)
-            self.pause_segmenting_var.set(True)
-        else:
-            self.queue.start()
-            self._push_server_pause(False)
-            self.pause_uploads_var.set(False)
-            self.pause_segmenting_var.set(False)
-        self._refresh_queue_panel()
-
-    def _push_server_pause(self, pause: bool) -> None:
-        threading.Thread(target=self._do_push_server_pause, args=(pause,), daemon=True).start()
-
-    def _do_push_server_pause(self, pause: bool) -> None:
-        try:
-            if pause:
-                self.client.pause_jobs()
-            else:
-                self.client.resume_jobs()
-        except Exception as exc:  # noqa: BLE001 — best-effort UX nicety, never fatal
-            verb = "pause" if pause else "resume"
-            self.after(0, self.statusbar.set_message, f"Couldn't {verb} server queue: {exc}")
 
     def _queue_move_up(self) -> None:
         filenames = self._selected_queue_filenames()

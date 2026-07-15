@@ -157,10 +157,10 @@ class CellCountsApp(tk.Tk):
         # "needs processing" before either records anything.
         self._active_processing_folders: set[Path] = set()
 
-        # Shared with ReviewPanel (passed into its constructor) so the
-        # Process menu here and the sidebar's combined Start/Stop button stay
-        # in sync for free -- both surfaces read/write the same two Vars
-        # instead of needing an explicit sync step.
+        # Backing state for the Process menu's two toggles (see _build_menu)
+        # -- a trace on each Var keeps the menu label in sync with whatever
+        # actually changed it (the toggle itself, or _run_processing
+        # restoring a folder's persisted paused state).
         self.pause_uploads_var = tk.BooleanVar(value=False)
         self.pause_segmenting_var = tk.BooleanVar(value=False)
 
@@ -204,18 +204,16 @@ class CellCountsApp(tk.Tk):
         self.viewmenu.add_command(label="Show Review", command=self._show_review, state="disabled")
         menubar.add_cascade(label="View", menu=self.viewmenu)
 
-        # Independent counterparts to the sidebar's combined Start/Stop button
-        # (review.py's _toggle_queue_running) -- same two underlying
-        # mechanisms (queue.stop/start for uploads, client.pause_jobs/
-        # resume_jobs for segmentation), just controllable separately. Plain
+        # Two independent halves of pausing processing: queue.stop/start for
+        # uploads, client.pause_jobs/resume_jobs for segmentation. Plain
         # commands whose *label* swaps Stop<->Start (not checkbuttons -- a
         # checkmark would say less at a glance than the label itself naming
         # the action a click performs), referenced by the fixed indices below
         # (PROCESSMENU_UPLOADS_INDEX/_SEGMENTING_INDEX) since entryconfig by
         # label stops working once the label's been changed once. A trace on
         # each Var (not a call at every mutation site) is what keeps the
-        # label right regardless of whether the change came from here or
-        # from the sidebar button -- both write to the same two Vars.
+        # label right regardless of what changed it -- e.g. _run_processing
+        # restoring a folder's persisted paused state.
         self.processmenu = tk.Menu(menubar, tearoff=0)
         self.processmenu.add_command(label="Stop Uploads", command=self._on_pause_uploads_toggle,
                                       state="disabled")
@@ -341,8 +339,7 @@ class CellCountsApp(tk.Tk):
             self.review_panel.destroy()
         self.manifest = manifest
         self.review_panel = ReviewPanel(self.content_frame, self.folder, manifest, self.statusbar,
-                                         recognized, queue, self.client,
-                                         self.pause_uploads_var, self.pause_segmenting_var)
+                                         recognized, queue, self.client)
         self.viewmenu.entryconfig("Show Review", state="normal")
         self.filemenu.entryconfig("Export Data...", state="normal")
         self.processmenu.entryconfig(PROCESSMENU_UPLOADS_INDEX, state="normal")
