@@ -310,6 +310,15 @@ class CellCountsApp(tk.Tk):
         manifest = Manifest(self.folder)
         recognized, skipped = scan_folder(self.folder)
         self.queue = ProcessingQueue(persist_path=self.folder / QUEUE_STATE_NAME)
+        # Uploads-pause is per-folder (it's this queue's own resume_event), so
+        # a fresh queue always starts running regardless of whatever the
+        # previously-open folder's toggle was left at -- reset the menu label
+        # to match immediately, before the background scan (which may later
+        # flip it back to paused via persisted state, see _process_folder)
+        # even gets a chance to run. Segmenting-pause is deliberately left
+        # alone here: it's a single global server-side queue shared by every
+        # folder, so it should keep reflecting whatever it actually is.
+        self.pause_uploads_var.set(False)
         self._show_review_panel(manifest, recognized, self.queue)
 
         if skipped:
