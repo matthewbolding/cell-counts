@@ -39,6 +39,7 @@ MIN_SCALE, MAX_SCALE = 0.01, 10.0
 ZOOM_STEP = 1.25
 PAN_STEP = 60  # screen px per wheel notch
 DRAG_THRESHOLD = 4  # screen px before a press+move counts as a drag, not a click
+MIN_DRAG_POINT_PX = 3  # screen px between consecutive lasso/freehand points, to avoid oversampling
 DOUBLE_CLICK_SECONDS = 0.4
 DOUBLE_CLICK_SCREEN_PX = 5
 OVERLAY_DEBOUNCE_MS = 80  # re-render the (expensive) overlay this long after a gesture settles
@@ -194,6 +195,21 @@ class _AddManyAction:
 
     def redo(self, cells: list[dict]) -> None:
         cells.extend(self.cells)
+
+
+class _RemoveManyAction:
+    """A drag-select delete removed several cells at once — mirror image of
+    _AddManyAction, same one-action-per-batch precedent."""
+
+    def __init__(self, cells: list[dict]):
+        self.cells = cells
+
+    def undo(self, cells: list[dict]) -> None:
+        cells.extend(self.cells)
+
+    def redo(self, cells: list[dict]) -> None:
+        for cell in self.cells:
+            cells.remove(cell)
 
 
 class _ExportDialog(tk.Toplevel):
@@ -434,11 +450,16 @@ class ReviewPanel(ttk.Frame):
         self.rescan_crop_rect: tuple[float, float, float, float] | None = None
         self.rescan_accepted: dict[tuple[int, int], dict] = {}  # (combo_index, local_cell_id) -> cell dict
         self._rescan_in_progress = False
+        self._pre_rescan_view: tuple[float, tuple[float, float]] | None = None  # (scale, origin) before the crop zoom
 
         self.mode = "review"  # "review" | "draw" | "delete" | "rescan"
         self.draw_points: list[tuple[float, float]] = []
         self._last_draw_click_time: float | None = None
         self._last_draw_click_screen: tuple[int, int] | None = None
+        self._lasso_points: list[tuple[float, float]] = []
+        self._last_drag_screen: tuple[int, int] | None = None
+        self._drag_line_id: str | None = None
+        self._drag_line_screen_points: list[int] = []
 
         # Undo/redo, keyed per filename so switching channels/samples and back
         # doesn't lose history; unbounded depth, cleared for an image only if it
@@ -506,6 +527,20 @@ class ReviewPanel(ttk.Frame):
                                   command=self._on_mode_change)
             rb.pack(side="left", padx=2)
             self.mode_radio_buttons.append(rb)
+
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Label(toolbar, text="Select:").pack(side="left")
+        self.selection_style_var = tk.StringVar(value="lasso")
+        for label, value in [("Lasso", "lasso"), ("Rectangle", "rectangle")]:
+            ttk.Radiobutton(toolbar, text=label, value=value,
+                             variable=self.selection_style_var).pack(side="left", padx=2)
+
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Label(toolbar, text="Draw:").pack(side="left")
+        self.draw_style_var = tk.StringVar(value="freehand")
+        for label, value in [("Freehand", "freehand"), ("Polygon", "polygon")]:
+            ttk.Radiobutton(toolbar, text=label, value=value,
+                             variable=self.draw_style_var).pack(side="left", padx=2)
 
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
         self.render_mode_btn = ttk.Button(toolbar, text="Mode: Outline", command=self._toggle_render_mode)
@@ -1048,17 +1083,29 @@ class ReviewPanel(ttk.Frame):
 
         n_failed = len(combos) - len(ok_combos)
         self.rescan_combos = ok_combos
-        self.rescan_combo_index = 0
+        # Land on the first combo that actually found something, rather than
+        # always combo 0 — an empty combo #1 with a productive combo #3 would
+        # otherwise look like the sweep found nothing at all.
+        first_hit = next(
+            (i for i, c in enumerate(ok_combos)
+             if any(cell["status"] == "kept" for cell in c.cells)),
+            None)
+        self.rescan_combo_index = first_hit if first_hit is not None else 0
         self.rescan_crop_rect = rect
         self.rescan_accepted = {}
         self.viewing_rescan_review = True
         self.instructions_label.pack_forget()
         self.rescan_controls_frame.pack(anchor="w", padx=10, pady=(0, 10), fill="x")
         self._update_mode_controls()
+        self._pre_rescan_view = (self.scale, self.origin)
         self._fit_to_rect(rect)
         self._update_rescan_review_display()
-        note = f" ({n_failed} combination(s) failed)" if n_failed else ""
-        self.statusbar.set_message(f"Rescan: reviewing {len(ok_combos)} combination(s){note}.")
+        if first_hit is None:
+            self.statusbar.set_message(
+                f"Rescan: no cells found in any of {len(ok_combos)} combination(s).")
+        else:
+            note = f" ({n_failed} combination(s) failed)" if n_failed else ""
+            self.statusbar.set_message(f"Rescan: reviewing {len(ok_combos)} combination(s){note}.")
 
     def _fit_to_rect(self, rect: tuple[float, float, float, float]) -> None:
         x0, y0, x1, y1 = rect
@@ -1132,12 +1179,14 @@ class ReviewPanel(ttk.Frame):
         if not self.viewing_rescan_review:
             return
         self._rescan_exit_review()
-        self._fit()
+        self._redraw(full=True)
         self.statusbar.set_message("Rescan discarded.")
 
     def _rescan_exit_review(self) -> None:
-        """Shared cleanup between discarding and merging: drop the sweep state
-        and swap the sidebar back to the normal instructions."""
+        """Shared cleanup between discarding and merging: drop the sweep state,
+        restore whatever zoom/pan the user had before the crop-fit zoom (rather
+        than resetting to whole-image Fit), and swap the sidebar back to the
+        normal instructions."""
         self.viewing_rescan_review = False
         self.rescan_combos = []
         self.rescan_combo_index = 0
@@ -1145,6 +1194,9 @@ class ReviewPanel(ttk.Frame):
         self.rescan_accepted = {}
         self.rescan_controls_frame.pack_forget()
         self.instructions_label.pack(anchor="w", padx=10, pady=(0, 10))
+        if self._pre_rescan_view is not None:
+            self.scale, self.origin = self._pre_rescan_view
+            self._pre_rescan_view = None
         self._update_mode_controls()
 
     # ------------------------------------------------------------------ #
@@ -1355,33 +1407,81 @@ class ReviewPanel(ttk.Frame):
         self._press_pos = (event.x, event.y)
         self._dragging = False
         self._drag_rect_id = None
+        self._lasso_points = []
+        self._last_drag_screen = None
+        self._drag_line_id = None
+        self._drag_line_screen_points = []
+
+    def _append_drag_point(self, points: list[tuple[float, float]], event, line_color: str,
+                            dash: tuple[int, int] | None = None) -> None:
+        """Append the current drag position in image space, throttled to
+        MIN_DRAG_POINT_PX screen pixels so a fast freehand/lasso stroke doesn't
+        accumulate a point per pixel of mouse movement, and extend a plain
+        canvas line item with the raw screen position for instant visual
+        feedback -- going through the (debounced) raster overlay pipeline
+        instead wouldn't show anything on screen until the gesture pauses."""
+        if self._last_drag_screen is not None:
+            lx, ly = self._last_drag_screen
+            if abs(event.x - lx) < MIN_DRAG_POINT_PX and abs(event.y - ly) < MIN_DRAG_POINT_PX:
+                return
+        points.append(self._screen_to_image(event.x, event.y))
+        self._last_drag_screen = (event.x, event.y)
+        self._drag_line_screen_points.extend((event.x, event.y))
+        if len(self._drag_line_screen_points) < 4:
+            return
+        if self._drag_line_id is None:
+            kwargs = {"fill": line_color, "width": 2}
+            if dash is not None:
+                kwargs["dash"] = dash
+            self._drag_line_id = self.canvas.create_line(*self._drag_line_screen_points, **kwargs)
+        else:
+            self.canvas.coords(self._drag_line_id, *self._drag_line_screen_points)
 
     def _on_canvas_drag(self, event) -> None:
         if self._press_pos is None or self.viewing_composite or self.viewing_rescan_review:
             return
         sx, sy = self._press_pos
+        freehand_draw = self.mode == "draw" and self.draw_style_var.get() == "freehand"
+        lasso_select = self.mode in ("review", "delete") and self.selection_style_var.get() == "lasso"
         if not self._dragging:
             if abs(event.x - sx) < DRAG_THRESHOLD and abs(event.y - sy) < DRAG_THRESHOLD:
                 return
-            if self.mode not in ("review", "rescan"):
-                return  # drag-select/drag-to-crop only apply in Review/Rescan mode
+            if self.mode not in ("review", "delete", "rescan") and not freehand_draw:
+                return  # drag-select/drag-to-crop/freehand-draw only apply here
             self._dragging = True
-        if self._drag_rect_id is None:
-            self._drag_rect_id = self.canvas.create_rectangle(
-                sx, sy, event.x, event.y, outline="#ffffff", dash=(4, 2), width=2)
+            self._drag_line_screen_points = [sx, sy]
+            if freehand_draw:
+                self.draw_points = []
+            elif lasso_select:
+                self._lasso_points = []
+
+        if freehand_draw:
+            self._append_drag_point(self.draw_points, event, "#ffdd00")
+        elif lasso_select:
+            self._append_drag_point(self._lasso_points, event, "#ffffff", dash=(4, 2))
         else:
-            self.canvas.coords(self._drag_rect_id, sx, sy, event.x, event.y)
+            if self._drag_rect_id is None:
+                self._drag_rect_id = self.canvas.create_rectangle(
+                    sx, sy, event.x, event.y, outline="#ffffff", dash=(4, 2), width=2)
+            else:
+                self.canvas.coords(self._drag_rect_id, sx, sy, event.x, event.y)
 
     def _on_canvas_release(self, event) -> None:
         if self._press_pos is None:
             return
         sx, sy = self._press_pos
         was_dragging = self._dragging
+        lasso_points = self._lasso_points
         if self._drag_rect_id is not None:
             self.canvas.delete(self._drag_rect_id)
         self._drag_rect_id = None
+        if self._drag_line_id is not None:
+            self.canvas.delete(self._drag_line_id)
+        self._drag_line_id = None
+        self._drag_line_screen_points = []
         self._press_pos = None
         self._dragging = False
+        self._lasso_points = []
 
         if self.viewing_composite:
             return  # Composite is view-only, regardless of the mode selector's value
@@ -1394,26 +1494,40 @@ class ReviewPanel(ttk.Frame):
 
         if self.mode == "review":
             if was_dragging:
-                x0, y0 = self._screen_to_image(sx, sy)
-                x1, y1 = self._screen_to_image(event.x, event.y)
-                self._select_rectangle((x0, y0, x1, y1))
+                if self.selection_style_var.get() == "lasso":
+                    self._apply_review_selection(self._cells_in_lasso(lasso_points))
+                else:
+                    x0, y0 = self._screen_to_image(sx, sy)
+                    x1, y1 = self._screen_to_image(event.x, event.y)
+                    self._apply_review_selection(self._cells_in_rect((x0, y0, x1, y1)))
             else:
                 img_x, img_y = self._screen_to_image(event.x, event.y)
                 cell = self._hit_test(img_x, img_y)
                 if cell is not None:
                     self._toggle_cell(cell)
 
-        elif self.mode == "draw" and not was_dragging:
-            self._on_draw_click(event.x, event.y)
+        elif self.mode == "draw":
+            if was_dragging and self.draw_style_var.get() == "freehand":
+                self._commit_draw()
+            elif not was_dragging and self.draw_style_var.get() == "polygon":
+                self._on_draw_click(event.x, event.y)
 
-        elif self.mode == "delete" and not was_dragging:
-            img_x, img_y = self._screen_to_image(event.x, event.y)
-            cell = self._hit_test(img_x, img_y)
-            if cell is not None:
-                self.current_cells.remove(cell)
-                self._push_undo(_RemoveAction(cell))
-                self._redraw(full=True)
-                self._update_counts()
+        elif self.mode == "delete":
+            if was_dragging:
+                if self.selection_style_var.get() == "lasso":
+                    self._apply_delete_selection(self._cells_in_lasso(lasso_points))
+                else:
+                    x0, y0 = self._screen_to_image(sx, sy)
+                    x1, y1 = self._screen_to_image(event.x, event.y)
+                    self._apply_delete_selection(self._cells_in_rect((x0, y0, x1, y1)))
+            else:
+                img_x, img_y = self._screen_to_image(event.x, event.y)
+                cell = self._hit_test(img_x, img_y)
+                if cell is not None:
+                    self.current_cells.remove(cell)
+                    self._push_undo(_RemoveAction(cell))
+                    self._redraw(full=True)
+                    self._update_counts()
 
         elif self.mode == "rescan" and was_dragging:
             x0, y0 = self._screen_to_image(sx, sy)
@@ -1432,12 +1546,20 @@ class ReviewPanel(ttk.Frame):
         self._redraw(full=True)
         self._update_counts()
 
-    def _select_rectangle(self, img_rect: tuple[float, float, float, float]) -> None:
+    def _cells_in_rect(self, img_rect: tuple[float, float, float, float]) -> list[dict]:
         x0, y0, x1, y1 = img_rect
         left, right = sorted((x0, x1))
         top, bottom = sorted((y0, y1))
-        selected = [c for c in self.current_cells
-                    if left <= c["centroid"][0] <= right and top <= c["centroid"][1] <= bottom]
+        return [c for c in self.current_cells
+                if left <= c["centroid"][0] <= right and top <= c["centroid"][1] <= bottom]
+
+    def _cells_in_lasso(self, points_image_space: list[tuple[float, float]]) -> list[dict]:
+        if len(points_image_space) < 3:
+            return []
+        return [c for c in self.current_cells
+                if geometry.point_in_polygon(c["centroid"][0], c["centroid"][1], points_image_space)]
+
+    def _apply_review_selection(self, selected: list[dict]) -> None:
         if not selected:
             return
         mark_as_cells = messagebox.askyesnocancel(
@@ -1454,10 +1576,22 @@ class ReviewPanel(ttk.Frame):
             c["edited"] = True
             changes.append((c, before, (c["status"], c["edited"])))
         # One action for the whole batch, so one Ctrl+Z undoes every cell the
-        # rectangle touched, not just the last one.
+        # selection touched, not just the last one.
         self._push_undo(_ModifyAction(changes))
         self._redraw(full=True)
         self._update_counts()
+
+    def _apply_delete_selection(self, selected: list[dict]) -> None:
+        if not selected:
+            return
+        for c in selected:
+            self.current_cells.remove(c)
+        # One action for the whole batch, matching _apply_review_selection's
+        # one-Ctrl+Z-per-gesture precedent.
+        self._push_undo(_RemoveManyAction(selected))
+        self._redraw(full=True)
+        self._update_counts()
+        self.statusbar.set_message(f"Deleted {len(selected)} cell(s).")
 
     # ------------------------------------------------------------------ #
     # Draw mode actions
@@ -1557,6 +1691,7 @@ class ReviewPanel(ttk.Frame):
     def _on_mode_change(self) -> None:
         self.mode = self.mode_var.get()
         self.draw_points = []
+        self._lasso_points = []
         cursors = {"review": "hand2", "draw": "tcross", "delete": "X_cursor", "rescan": "crosshair"}
         self.canvas.configure(cursor=cursors.get(self.mode, "arrow"))
         self._redraw(full=True)

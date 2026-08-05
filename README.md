@@ -13,7 +13,7 @@ split into a client and a server:
 ## How it fits together
 
 Each sample is three channel images following `{PREFIX}_{CCK,CHR,SNAP}.tif`, where
-`PREFIX` is a letter (animal) + number (sample), e.g. `A1`, `K9`. SNAP is the full
+`PREFIX` is one or more letters (animal) + number (sample), e.g. `A1`, `K9`, `AA1`. SNAP is the full
 cell population for that sample; CCK and CHR are gene-expression markers. The client
 segments all three channels the same way and — once reviewed — the interesting
 result is the *overlap* between CCK and CHR detections: where they coincide is where

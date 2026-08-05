@@ -36,7 +36,8 @@ python client/app.py
    and out of the same folder repeatedly.
 2. **Pick a folder.** Unless you checked the box above, a folder picker opens —
    choose the folder containing your `{PREFIX}_{CCK,CHR,SNAP}.tif` images (e.g.
-   `A1_SNAP.tif`, `A1_CCK.tif`, ...).
+   `A1_SNAP.tif`, `A1_CCK.tif`, ...; `PREFIX` can be more than one letter, e.g.
+   `AA1_SNAP.tif`, once you run past `A`-`Z`).
 3. **The review screen opens right away** — you don't have to wait for processing
    to finish before you can look around. In the background, the app checks every
    recognized image against what it already knows (tracked in a `cellcounts.json`

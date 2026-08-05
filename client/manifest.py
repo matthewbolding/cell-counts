@@ -44,8 +44,8 @@ MANIFEST_NAME = "cellcounts.json"
 CELLS_SUFFIX = ".cells.json"
 HASH_CHUNK_SIZE = 8 * 1024 * 1024
 
-# {PREFIX}_{CCK,CHR,SNAP}.tif — PREFIX is a letter (animal) + digits (sample number).
-FILENAME_RE = re.compile(r"^([A-Za-z]\d+)_(CCK|CHR|SNAP)\.tif$", re.IGNORECASE)
+# {PREFIX}_{CCK,CHR,SNAP}.tif — PREFIX is one or more letters (animal) + digits (sample number).
+FILENAME_RE = re.compile(r"^([A-Za-z]+\d+)_(CCK|CHR|SNAP)\.tif$", re.IGNORECASE)
 
 _SKIP_NAMES = {MANIFEST_NAME}
 
