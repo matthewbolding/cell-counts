@@ -1087,8 +1087,7 @@ class ReviewPanel(ttk.Frame):
         # always combo 0 — an empty combo #1 with a productive combo #3 would
         # otherwise look like the sweep found nothing at all.
         first_hit = next(
-            (i for i, c in enumerate(ok_combos)
-             if any(cell["status"] == "kept" for cell in c.cells)),
+            (i for i, c in enumerate(ok_combos) if c.cells),
             None)
         self.rescan_combo_index = first_hit if first_hit is not None else 0
         self.rescan_crop_rect = rect
@@ -1117,17 +1116,16 @@ class ReviewPanel(ttk.Frame):
 
     def _update_rescan_review_display(self) -> None:
         combo = self.rescan_combos[self.rescan_combo_index]
-        kept = [c for c in combo.cells if c["status"] == "kept"]
         self.filename_var.set(
             f"Rescan {self.rescan_combo_index + 1}/{len(self.rescan_combos)}  "
             f"(diameter={combo.diameter:g}, cellprob={combo.cellprob_threshold:g})")
-        self.counts_var.set(f"{len(kept)} proposed here\n{len(self.rescan_accepted)} accepted (all combos)")
+        self.counts_var.set(
+            f"{len(combo.cells)} proposed here\n{len(self.rescan_accepted)} accepted (all combos)")
         self._redraw(full=True)
 
     def _on_rescan_review_click(self, img_x: float, img_y: float) -> None:
         combo = self.rescan_combos[self.rescan_combo_index]
-        kept = [c for c in combo.cells if c["status"] == "kept"]
-        cell = self._hit_test(img_x, img_y, kept)
+        cell = self._hit_test(img_x, img_y, combo.cells)
         if cell is None:
             return
         key = (self.rescan_combo_index, cell["id"])
@@ -1357,15 +1355,19 @@ class ReviewPanel(ttk.Frame):
 
     def _render_rescan_overlay(self, bg, rect, vw: int, vh: int):
         """The current combination's proposed cells: undecided ones outlined in
-        yellow, accepted ones filled solid green. All rescan-returned cells come
-        back `status: "kept"` (the server already dropped what it filtered out),
-        so channel_color drives every cell's color uniformly here — the
-        kept/filtered split render_overlay normally does doesn't apply."""
+        yellow, accepted ones filled solid green. A combo's cells aren't all
+        `status: "kept"` — the server's own brightness/locality filters can mark
+        some "filtered" (segment.py's _build_cells) — but a rescan is exactly a
+        human overriding those automatic filters, so every returned cell is an
+        equal proposal here. Force status to "kept" before handing off to
+        render_overlay, which otherwise renders "filtered" cells a fixed,
+        non-channel gray that _on_rescan_review_click won't hit-test against."""
         combo = self.rescan_combos[self.rescan_combo_index]
         accepted_keys = {key for key in self.rescan_accepted if key[0] == self.rescan_combo_index}
         accepted_ids = {key[1] for key in accepted_keys}
-        pending = [c for c in combo.cells if c["id"] not in accepted_ids]
-        accepted = [c for c in combo.cells if c["id"] in accepted_ids]
+        uniform_cells = [{**c, "status": "kept"} for c in combo.cells]
+        pending = [c for c in uniform_cells if c["id"] not in accepted_ids]
+        accepted = [c for c in uniform_cells if c["id"] in accepted_ids]
 
         pending_layer = rendering.render_overlay(
             pending, rect, self.scale, (vw, vh), "outline", RESCAN_PROPOSED_COLOR)
