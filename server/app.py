@@ -83,7 +83,15 @@ async def lifespan(_app: FastAPI):
             await sweep_task
 
 
-app = FastAPI(title="cell-counts compute server", lifespan=lifespan)
+# No interactive docs or OpenAPI schema: clients don't use them, and they
+# shouldn't be exposed when the server is reachable from the Internet.
+app = FastAPI(
+    title="cell-counts compute server",
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 
 # --------------------------------------------------------------------------- #
