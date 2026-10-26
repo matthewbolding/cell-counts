@@ -182,9 +182,11 @@ Scan, then hash, then upload:
 
 It's a single page per project:
 
-- **Menu bar:** File (Open Project…, Add Images…, Export Data…, Share Project…),
-  View (GPU Queue, Show Log), Process (Stop/Start Uploads, Stop/Start Segmenting),
-  plus the account menu on the right.
+- **Menu bar:** File (Open Project…, Add Images…, Export Data…, Project Settings…,
+  where sharing lives), View (Show Review, Show GPU Queue, Show Log, Fit to
+  Window), Process (Stop/Start Uploads, Stop/Start Segmenting, Retry Failed
+  Images), plus the account menu on the right (Settings…, Manage Users… for
+  admins, Sign Out).
 - **Toolbar:** mode (Review / Draw / Delete / Rescan), Select (Lasso / Rectangle),
   Draw (Freehand / Polygon), Mode: Outline/Mask, channel colors, − / Fit / +.
 - **Left:** Samples (rows with SNAP/CCK/CHR readiness dots) above Queue (breathing

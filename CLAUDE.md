@@ -61,18 +61,31 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+The app is in `web/` (setup in `web/README.md`). Postgres for development and tests:
+`docker compose -f web/docker-compose.dev.yml up -d`.
 
 ```bash
-# Example:
-# npm install
-# npm test
+cd web
+uv run pytest                                   # backend (test DB in the dev Postgres)
+uv run ruff check .
+(cd frontend && npm test && npm run build)      # frontend typecheck, tests, bundle
+uv run --env-file dev.env python manage.py runserver   # dev server; workers: run_worker --resource cpu|gpu
 ```
+
+CI (`.github/workflows/ci.yml`) runs the same checks on every push and pull request.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+Cell Counts is a Django web app at cellcounts.matthewbolding.com: researchers upload folders of
+`{PREFIX}_{CCK,CHR,SNAP}.tif` images, a GPU worker segments them with Cellpose-SAM, and they review cells in a
+TypeScript canvas review screen. Postgres holds accounts, projects and every cell; TIFFs and tiles live on an NFS
+NAS; CPU and GPU workers poll a job table. Production is docker compose on one GPU server behind a Cloudflare
+Tunnel. `web/DESIGN.md` covers the architecture, security model, data model and API; `web/DEPLOY.md` the
+server, updates, backups and restores.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- The repo is public: keep LAN addresses, host names and secrets out of committed files and out of beads.
+- Python: ruff (line length 120). TypeScript: plain DOM, no framework; the strict CSP forbids inline scripts
+  and styles.
+- Comments explain why. Text people see is plain English, without internal jargon.

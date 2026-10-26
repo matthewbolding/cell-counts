@@ -1,0 +1,65 @@
+# The same checks as `web/README.md` → Tests, on every push and pull request:
+# frontend typecheck, tests and build (the backend tests read the build's
+# manifest), then ruff and pytest against Postgres. Versions match deploy/Dockerfile.
+name: CI
+
+on:
+  push:
+    branches: [main, web-app]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17.11-trixie
+        env:
+          POSTGRES_USER: cellcounts
+          POSTGRES_PASSWORD: cellcounts
+          POSTGRES_DB: cellcounts
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cellcounts"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/frontend/package-lock.json
+
+      - name: Frontend — typecheck, tests, build
+        working-directory: web/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm run build
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+          cache-dependency-glob: web/uv.lock
+
+      - name: Backend — lint and tests
+        working-directory: web
+        run: |
+          uv sync --locked
+          uv run ruff check .
+          uv run pytest
