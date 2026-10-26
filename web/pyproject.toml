@@ -3,6 +3,7 @@ name = "cellcounts-web"
 version = "0.1.0"
 description = "Cell Counts web app: multi-user cell segmentation review"
 requires-python = ">=3.13,<3.14"
+license = "MIT"
 dependencies = [
     "django>=6.0",
     "django-allauth[mfa]>=65.0",

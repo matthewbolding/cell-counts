@@ -27,3 +27,7 @@ Built by Matthew Bolding with [Claude](https://claude.ai) (Anthropic).
 
 Segmentation runs on [Cellpose-SAM](https://github.com/MouseLand/cellpose); see that repo for citation details
 if you use this tool's output in published work.
+
+## License
+
+[MIT](LICENSE).
