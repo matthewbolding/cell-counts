@@ -264,6 +264,31 @@ describe("uploads", () => {
     expect(m.progress().summary).toBe("Done. 1 uploaded (256 B), 0 already up to date.");
   });
 
+  it("only shows the tuner moments when every lane is busy", async () => {
+    // Regression: sampling as a chunk finished saw one lane short every time,
+    // so every measurement was thrown away and the count never changed.
+    server.manual = true;
+    const tuner = new LaneTuner({ start: 2 });
+    const busy: number[] = [];
+    const sample = tuner.sample.bind(tuner);
+    tuner.sample = (total, now, n) => {
+      busy.push(n);
+      sample(total, now, n);
+    };
+    const { m } = manager(tuner);
+    await m.add(scanOf(["A1_SNAP.tif", 384])); // 6 chunks
+    await until(() => open().length === 2);
+    for (let i = 0; i < 4; i++) {
+      server.calls[i].progress(32);
+      server.calls[i].ok();
+      await until(() => open().length === 2); // its lane moved on to the next chunk
+    }
+    expect(busy.length).toBeGreaterThan(4);
+    expect(busy.every((n) => n === 2)).toBe(true);
+    for (const c of open()) c.ok();
+    await untilDone(m);
+  });
+
   it("drops files the server already has from the total, and counts resumed chunks as done", async () => {
     const { m } = manager();
     server.skip.add("A1_CCK.tif");

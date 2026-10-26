@@ -520,23 +520,27 @@ export class UploadManager {
       item.sent += blob.size;
       this.batch.bytesDone += blob.size;
       this.sentThisSession += blob.size;
-      this.progressed(item);
+      // Not a sample for the tuner: this lane is between chunks for a moment,
+      // which would look like a lane with nothing to send.
+      this.progressed(item, false);
       if (item.present!.size === item.totalChunks) void this.finishItem(item);
       return;
     }
   }
 
   /** Bytes moved: the file's share, the speed, and the tuner, which may want more lanes. */
-  private progressed(item: UploadItem): void {
+  private progressed(item: UploadItem, sampleTuner = true): void {
     let inItem = 0;
     for (const w of this.wire.values()) if (w.item === item) inItem += w.loaded;
     item.fraction = item.file.size ? (item.sent + inItem) / item.file.size : 1;
     const now = performance.now();
     const total = this.sentThisSession + this.inFlightBytes();
     this.meter.record(total, now);
-    const lanes = this.tuner.lanes;
-    this.tuner.sample(total, now, this.wire.size);
-    if (this.tuner.lanes > lanes) this.pump();
+    if (sampleTuner) {
+      const lanes = this.tuner.lanes;
+      this.tuner.sample(total, now, this.wire.size);
+      if (this.tuner.lanes > lanes) this.pump();
+    }
     this.notify();
   }
 
