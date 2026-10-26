@@ -1,14 +1,12 @@
 """
 Projects: visibility and roles, sharing, deletion, the review-screen API (cell
-ops, edit leases, UI state, retry), tile authorization, and coexpression parity
-with the desktop client.
+ops, edit leases, UI state, retry), tile authorization, and coexpression against
+reference results.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -20,7 +18,6 @@ from projects.models import Cell, Image, ImageLock, ImageStatus, Membership, Pro
 
 pytestmark = pytest.mark.django_db
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def square(cx: float, cy: float, r: float) -> list[list[list[float]]]:
@@ -315,23 +312,13 @@ def test_storage_refuses_without_volume_marker(settings, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# Coexpression: identical results to the desktop client
+# Coexpression: the desktop version's results for this layout, kept in
+# fixtures/coexpression.json (cck_id, chr_id, overlap fraction per pair).
 # --------------------------------------------------------------------------- #
-def _desktop_coexpression():
-    client_dir = REPO_ROOT / "client"
-    sys.path.insert(0, str(client_dir))
-    try:
-        spec = importlib.util.spec_from_file_location("desktop_coexpression", client_dir / "coexpression.py")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module  # dataclasses look their module up here
-        spec.loader.exec_module(module)
-        return module
-    finally:
-        sys.path.remove(str(client_dir))
-        sys.modules.pop("geometry", None)
+COEXPRESSION = json.loads((Path(__file__).parent / "fixtures" / "coexpression.json").read_text())
 
 
-def test_composite_matches_desktop(login, user, project, sample):
+def test_composite_matches_reference(login, user, project, sample):
     import numpy as np
 
     from processing.coexpression import compute_coexpression
@@ -350,15 +337,14 @@ def test_composite_matches_desktop(login, user, project, sample):
 
     as_dicts = [[c.as_dict() for c in cells] for cells in (cck_cells, chr_cells)]
     ours = compute_coexpression(*as_dicts)
-    theirs = _desktop_coexpression().compute_coexpression(*as_dicts)
-    assert ours.pairs == theirs.pairs and ours.pairs
-    assert ours.cck_ids == theirs.cck_ids and ours.chr_ids == theirs.chr_ids
+    assert [list(p) for p in ours.pairs] == COEXPRESSION["pairs"] and ours.pairs
+    assert sorted(ours.cck_ids) == COEXPRESSION["cck_ids"] and sorted(ours.chr_ids) == COEXPRESSION["chr_ids"]
 
     payload = login(user).get(reverse("projects:api_composite", args=[sample.id])).json()
     assert payload["available"] is True
-    assert payload["n_pairs"] == len(theirs.pairs)
+    assert payload["n_pairs"] == len(COEXPRESSION["pairs"])
     assert payload["snap_kept"] == 49 - 7
-    assert payload["rate_pct"] == round(len(theirs.pairs) / 42 * 100, 2)
+    assert payload["rate_pct"] == round(len(COEXPRESSION["pairs"]) / 42 * 100, 2)
 
 
 def test_composite_unavailable_until_all_channels_done(login, user, project, sample):

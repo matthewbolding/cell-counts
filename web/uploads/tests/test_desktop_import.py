@@ -1,28 +1,26 @@
 """
-Bringing work done in the desktop app into the web app.
+Bringing review work from the desktop version of Cell Counts into the web app.
 
-The desktop folders here are written by the desktop client's own code
-(client/manifest.py), with the kinds of edits a reviewer makes there: toggled
-detections, deleted cells, hand-drawn cells and merged rescan cells. They're
-then uploaded the way the browser does it (uploads/uploader.ts): a file's
-review data is sent only when cellcounts.json says it finished processing and
-its recorded sha256 matches the file. Afterwards every cell must match the
-sidecar exactly, and the export must give the desktop export's numbers.
+A reviewed folder holds `cellcounts.json` (one entry per image: sha256,
+status, segmentation params) and a `<file>.cells.json` per image. The folder
+written here is in exactly that format. Its cells, and that folder's export
+numbers, are in fixtures/desktop_review.json, produced by the desktop code
+itself, with edits of every kind a reviewer makes: toggled detections, deleted
+cells, a hand-drawn cell and a merged rescan cell. The folder is uploaded the
+way the browser does it (uploads/uploader.ts): a file's review data is sent
+only when cellcounts.json says it finished processing and its recorded sha256
+matches the file. Afterwards every cell must match the sidecar exactly, and the
+export must give the same numbers.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
-import sys
-import uuid
 from pathlib import Path
 
 import pytest
-import tifffile
 from django.urls import reverse
 
-from processing import segmentation
 from processing.export import build_export_rows
 from processing.models import Job, JobKind
 from processing.worker import Worker
@@ -31,8 +29,8 @@ from uploads.tests.helpers import TEST_CHUNK, post_json, sha, tiff_bytes, upload
 
 pytestmark = pytest.mark.django_db
 
-CLIENT_DIR = Path(__file__).resolve().parents[3] / "client"
-DESKTOP_MODULES = ("manifest", "export", "coexpression", "geometry")
+FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "desktop_review.json").read_text())
+TIFF_SEEDS = {"SNAP": 11, "CCK": 12, "CHR": 13}  # the images FIXTURE's cells were found in
 
 
 @pytest.fixture(autouse=True)
@@ -41,56 +39,26 @@ def small_chunks(settings):
 
 
 @pytest.fixture
-def desktop():
-    """The desktop client's modules, imported from ../client and removed again
-    afterwards so they can't leak into other tests."""
-    sys.path.insert(0, str(CLIENT_DIR))
-    try:
-        modules = {name: importlib.import_module(name) for name in DESKTOP_MODULES}
-        yield modules
-    finally:
-        sys.path.remove(str(CLIENT_DIR))
-        for name in DESKTOP_MODULES:
-            sys.modules.pop(name, None)
-
-
-@pytest.fixture
 def project(user):
     return Project.objects.create(owner=user, name="From desktop")
 
 
-def review_like_a_person(channel: str, cells: list[dict], desktop) -> list[dict]:
-    """Edits made the way review.py makes them."""
-    cells = [dict(c) for c in cells]
-    kept = [c for c in cells if c["status"] == "kept"]
-    if channel == "SNAP":
-        cells.remove(kept[0])  # Delete mode
-    elif channel == "CCK":
-        for c in kept[:3]:  # Review mode, drag-select -> "not cells"
-            c["status"], c["edited"] = "filtered", True
-        filtered = [c for c in cells if c["status"] == "filtered" and not c["edited"]]
-        if filtered:  # ...and one detection the filters dropped, marked as a cell after all
-            filtered[0]["status"], filtered[0]["edited"] = "kept", True
-    else:
-        next_id = max(c["id"] for c in cells) + 1
-        ring = [[10.0, 10.0], [24.0, 10.0], [24.0, 22.0], [10.0, 22.0]]
-        area, centroid = desktop["geometry"].shoelace_area_centroid(ring)
-        cells.append({"id": next_id, "polygons": [ring], "centroid": centroid, "area": area, "status": "kept",
-                      "color": None, "source": "human", "edited": True})  # Draw mode
-        rescanned = dict(kept[0], id=next_id + 1, source=f"rescan:{uuid.uuid4().hex}", edited=True)
-        cells.append(rescanned)  # Rescan -> Merge Accepted
-    return cells
-
-
-def make_desktop_folder(folder: Path, desktop) -> None:
-    manifest = desktop["manifest"].Manifest(folder)
-    for channel, seed in (("SNAP", 11), ("CCK", 12), ("CHR", 13)):
-        path = folder / f"A1_{channel}.tif"
-        path.write_bytes(tiff_bytes(seed=seed, shape=(400, 520), n_cells=90))
-        result = segmentation.run(segmentation.FakeModel(), tifffile.imread(path))
-        cells = review_like_a_person(channel, result["cells"], desktop)
-        manifest.record_result(path.name, "A1", channel, f"sha256:{sha(path.read_bytes())}", result["width"],
-                               result["height"], result["params"], cells, path)
+def write_desktop_folder(folder: Path) -> None:
+    """A reviewed folder as the desktop version left it: the TIFFs, a
+    `.cells.json` per image, and `cellcounts.json` (schema 2) marking each one
+    done with its sha256."""
+    images = {}
+    for name, entry in FIXTURE["images"].items():
+        path = folder / name
+        path.write_bytes(tiff_bytes(seed=TIFF_SEEDS[entry["channel"]], shape=(400, 520), n_cells=90))
+        (folder / f"{name}.cells.json").write_text(json.dumps({"cells": entry["cells"]}))
+        st = path.stat()
+        images[name] = {
+            "prefix": entry["prefix"], "channel": entry["channel"], "hash": f"sha256:{sha(path.read_bytes())}",
+            "mtime": st.st_mtime, "size": st.st_size, "width": entry["width"], "height": entry["height"],
+            "status": "done", "processed_at": "2026-10-26T00:00:00+00:00", "params": entry["params"], "error": None,
+        }
+    (folder / "cellcounts.json").write_text(json.dumps({"schema_version": 2, "images": images}))
 
 
 def desktop_review_data(folder: Path, name: str, data: bytes) -> dict | None:
@@ -111,10 +79,10 @@ def web_cells(client, image: Image) -> list[dict]:
     return client.get(reverse("projects:api_image_cells", args=[image.id])).json()["cells"]
 
 
-def test_desktop_folder_arrives_intact(tmp_path, desktop, login, user, project):
+def test_desktop_folder_arrives_intact(tmp_path, login, user, project):
     folder = tmp_path / "A1-folder"
     folder.mkdir()
-    make_desktop_folder(folder, desktop)
+    write_desktop_folder(folder)
 
     client = login(user)
     for name in ("A1_SNAP.tif", "A1_CCK.tif", "A1_CHR.tif"):
@@ -131,26 +99,20 @@ def test_desktop_folder_arrives_intact(tmp_path, desktop, login, user, project):
         sidecar = json.loads((folder / f"{image.filename}.cells.json").read_text())["cells"]
         assert normalize(web_cells(client, image)) == normalize(sidecar), image.filename
 
-    # Same numbers as the desktop app's own export of that folder.
-    samples = {"A1": {ch: f"A1_{ch}.tif" for ch in ("SNAP", "CCK", "CHR")}}
-    desktop_summary, desktop_cells = desktop["export"].build_export_rows(
-        ["A1"], samples, desktop["manifest"].Manifest(folder), lambda prefix, channel: "ready")
+    # Same numbers as the desktop version's own export of that folder.
     web_summary, web_cell_rows = build_export_rows(project, ["A1"])
-    assert web_summary == desktop_summary
-    def order(row):
-        return row["channel"], row["cell_id"]
-
-    assert sorted(web_cell_rows, key=order) == sorted(desktop_cells, key=order)
-    assert desktop_summary[0]["coexpressing_pairs"] not in (0, "###")
+    assert web_summary == FIXTURE["export"]["summary"]
+    assert sorted(web_cell_rows, key=lambda row: (row["channel"], row["cell_id"])) == FIXTURE["export"]["cells"]
+    assert web_summary[0]["coexpressing_pairs"] not in (0, "###")
 
 
-def test_review_data_added_after_the_tiffs(tmp_path, desktop, login, user, project):
+def test_review_data_added_after_the_tiffs(tmp_path, login, user, project):
     """TIFFs uploaded on their own first (so the server segmented them), the
-    desktop .cells.json files added later: the desktop work replaces the
-    server's unreviewed segmentation."""
+    .cells.json files added later: the desktop review replaces the server's
+    unreviewed segmentation."""
     folder = tmp_path / "A1-folder"
     folder.mkdir()
-    make_desktop_folder(folder, desktop)
+    write_desktop_folder(folder)
     client = login(user)
     for name in ("A1_SNAP.tif", "A1_CCK.tif"):
         upload(client, project, name, (folder / name).read_bytes(), last_modified=1)
@@ -180,10 +142,10 @@ def test_review_data_added_after_the_tiffs(tmp_path, desktop, login, user, proje
     assert post_json(client, url, body).json() == {"result": "unchanged"}
 
 
-def test_web_edits_are_never_overwritten(tmp_path, desktop, login, user, project):
+def test_web_edits_are_never_overwritten(tmp_path, login, user, project):
     folder = tmp_path / "A1-folder"
     folder.mkdir()
-    make_desktop_folder(folder, desktop)
+    write_desktop_folder(folder)
     client = login(user)
     data = (folder / "A1_CCK.tif").read_bytes()
     upload(client, project, "A1_CCK.tif", data, last_modified=1)

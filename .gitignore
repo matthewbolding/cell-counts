@@ -11,7 +11,6 @@ __pycache__/
 *.xlsx
 *.bak
 
-server/data/
 .env
 
 .DS_Store
@@ -23,9 +22,11 @@ server/data/
 .beads/proxieddb/
 *.gate.lock*
 
-# Web app (web/). The *.html / *.json rules above are for the desktop tool's
-# reports and per-folder manifests; templates and frontend config must be kept.
+# The *.tif / *.json / *.html rules above keep image folders and reports that sit
+# next to the code out of git; the app's own templates, config and test fixtures
+# are kept.
 !web/templates/**/*.html
+!web/**/tests/fixtures/*.json
 !web/frontend/package.json
 !web/frontend/package-lock.json
 !web/frontend/tsconfig.json
