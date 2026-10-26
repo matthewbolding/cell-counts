@@ -15,12 +15,24 @@
   });
 
   for (const menu of menus()) {
+    const summary = menu.querySelector("summary");
+    // Pointing at another menu's title while one is open switches to it; the
+    // click that usually follows must not toggle that menu closed again.
+    let switchedByHover = false;
     menu.addEventListener("toggle", () => {
       if (!menu.open) return;
       for (const other of menus()) if (other !== menu) other.open = false;
     });
-    menu.querySelector("summary").addEventListener("mouseenter", () => {
-      if (menus().some((m) => m.open && m !== menu)) menu.open = true;
+    summary.addEventListener("mouseenter", () => {
+      if (menus().some((m) => m.open && m !== menu)) {
+        menu.open = true;
+        switchedByHover = true;
+      }
+    });
+    summary.addEventListener("mouseleave", () => { switchedByHover = false; });
+    summary.addEventListener("click", (event) => {
+      if (switchedByHover) event.preventDefault();
+      switchedByHover = false;
     });
   }
 

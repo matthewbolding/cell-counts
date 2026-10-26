@@ -71,13 +71,25 @@ export class MenuBar {
     }
     const summary = el("summary", { text: menu.label });
     const details = el("details", { class: `menu${menu.right ? " right" : ""}` }, summary, items);
+    // Pointing at another menu's title while one is open switches to it, as in
+    // a desktop menu bar. The click that usually follows must not then toggle the
+    // menu it just switched to closed again.
+    let switchedByHover = false;
     details.addEventListener("toggle", () => {
       if (!details.open) return;
       this.refresh();
       for (const other of this.details) if (other !== details) other.open = false;
     });
     summary.addEventListener("mouseenter", () => {
-      if (this.details.some((d) => d.open && d !== details)) details.open = true;
+      if (this.details.some((d) => d.open && d !== details)) {
+        details.open = true;
+        switchedByHover = true;
+      }
+    });
+    summary.addEventListener("mouseleave", () => (switchedByHover = false));
+    summary.addEventListener("click", (event) => {
+      if (switchedByHover) event.preventDefault();
+      switchedByHover = false;
     });
     this.details.push(details);
     return details;
