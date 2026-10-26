@@ -4,20 +4,6 @@
 {% block content %}
 <p><a href="{% url 'projects:workspace' project.id %}">← Back to {{ project.name }}</a></p>
 
-{% if is_owner %}
-<section class="panel">
-  <header><h2>Name</h2></header>
-  <div class="body">
-    <form method="post" action="{% url 'projects:rename' project.id %}" class="inline-form">
-      {% csrf_token %}
-      <label for="project-name">Name:</label>
-      <input id="project-name" type="text" name="name" value="{{ project.name }}" maxlength="120" required>
-      <button type="submit">Rename</button>
-    </form>
-  </div>
-</section>
-{% endif %}
-
 <section class="panel">
   <header><h2>Sharing</h2></header>
   <div class="body">
@@ -67,6 +53,19 @@
 </section>
 
 {% if is_owner %}
+<div class="panel-grid">
+<section class="panel">
+  <header><h2>Name</h2></header>
+  <div class="body">
+    <form method="post" action="{% url 'projects:rename' project.id %}" class="inline-form">
+      {% csrf_token %}
+      <label for="project-name">Name:</label>
+      <input id="project-name" type="text" name="name" value="{{ project.name }}" maxlength="120" required>
+      <button type="submit">Rename</button>
+    </form>
+  </div>
+</section>
+
 <section class="panel">
   <header><h2>Delete project</h2></header>
   <div class="body">
@@ -80,5 +79,6 @@
     </form>
   </div>
 </section>
+</div>
 {% endif %}
 {% endblock %}

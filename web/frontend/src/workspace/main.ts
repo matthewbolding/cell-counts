@@ -16,10 +16,10 @@ async function start(): Promise<void> {
       projectId: d.projectId!,
       projectsUrl: d.projectsUrl!,
       settingsUrl: d.settingsUrl!,
-      queueUrl: d.queueUrl!,
       accountSettingsUrl: d.accountSettingsUrl!,
       logoutUrl: d.logoutUrl!,
       manageUrl: d.manageUrl ?? "",
+      messages: d.messages ?? "",
       csrfToken,
     }, boot);
   } catch (err) {

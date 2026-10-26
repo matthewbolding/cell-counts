@@ -190,7 +190,16 @@ label { user-select: none; }
   overflow: auto;
   padding: 16px;
 }
-.content.narrow > * { max-width: 920px; }
+
+/* Panels side by side when there's room, stacked when there isn't. */
+.panel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr));
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+.panel-grid > .panel { margin-bottom: 0; }
 
 .statusbar {
   display: flex;
@@ -271,7 +280,7 @@ table.list .empty td { padding: 16px 8px; color: var(--text-muted); text-align: 
 .badge.warn { border-color: #f0d48a; background: #fff8e1; }
 .badge.bad { border-color: var(--error-border); background: var(--error-bg); }
 
-meter.storage { display: block; width: 100%; max-width: 420px; height: 10px; }
+meter.storage { display: block; width: 100%; height: 10px; }
 .spaced { margin-top: 8px; }
 .subheading { margin: 16px 0 6px; }
 .quota-input { width: 70px; }

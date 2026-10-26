@@ -23,7 +23,7 @@
     {% include "partials/account_menu.html" %}
   </nav>
 
-  <main class="content {% block content_class %}narrow{% endblock %}">
+  <main class="content {% block content_class %}{% endblock %}">
     {% if messages %}
     <div class="messages" role="status">
       {% for message in messages %}<div class="message-bar {{ message.tags }}">{{ message }}</div>{% endfor %}

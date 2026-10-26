@@ -97,6 +97,10 @@ export interface QueueItem {
   label: string;
   state: QueueRowState;
   title?: string;
+  /** Short right-aligned note, e.g. "62%" or "checking 40%". */
+  detail?: string;
+  /** 0..1: drawn as a thin bar along the bottom of the row. */
+  progress?: number;
 }
 
 const BREATHE_TICK_MS = 60;
@@ -120,7 +124,7 @@ export class QueuePanel {
   private readonly list: HTMLElement;
   private items: QueueItem[] = [];
   private signature: string | null = null; // null: nothing rendered yet, not even the empty state
-  private rowEls = new Map<string, HTMLElement>();
+  private rowEls = new Map<string, { row: HTMLElement; detail: HTMLElement }>();
   private selected = new Set<string>();
   private anchor: string | null = null;
   private animation = 0;
@@ -138,11 +142,17 @@ export class QueuePanel {
     this.root = el("section", { class: "ws-pane" }, el("h2", { text: "Queue" }), this.list, buttons);
   }
 
+
   setItems(items: QueueItem[]): void {
     const signature = items.map((i) => `${i.key}:${i.state}:${i.label}`).join("|");
-    if (signature === this.signature) return; // unchanged: keep scroll position and selection exactly
-    this.signature = signature;
     this.items = items;
+    if (signature === this.signature) {
+      // Same rows: just move their progress along, without rebuilding (which
+      // would reset scrolling and interrupt a click in progress).
+      this.paintProgress();
+      return;
+    }
+    this.signature = signature;
     const keys = new Set(items.map((i) => i.key));
     for (const k of [...this.selected]) if (!keys.has(k)) this.selected.delete(k);
 
@@ -151,14 +161,26 @@ export class QueuePanel {
     this.rowEls.clear();
     if (!items.length) this.list.append(el("div", { class: "ws-empty", text: "Nothing waiting." }));
     for (const item of items) {
-      const row = el("div", { class: "ws-row", text: item.label, title: item.title ?? "", attrs: { role: "option" },
-        on: { click: (e) => this.click(item.key, e) } });
-      this.rowEls.set(item.key, row);
+      const detail = el("span", { class: "ws-row-detail" });
+      const row = el("div", { class: "ws-row", title: item.title ?? "", attrs: { role: "option" },
+        on: { click: (e) => this.click(item.key, e) } }, el("span", { class: "ws-row-label", text: item.label }), detail);
+      this.rowEls.set(item.key, { row, detail });
       this.list.append(row);
     }
     this.list.scrollTop = scrollTop;
     this.paint();
+    this.paintProgress();
     this.syncAnimation();
+  }
+
+  private paintProgress(): void {
+    for (const item of this.items) {
+      const els = this.rowEls.get(item.key);
+      if (!els) continue;
+      els.detail.textContent = item.detail ?? "";
+      els.row.classList.toggle("has-progress", item.progress !== undefined);
+      if (item.progress !== undefined) els.row.style.setProperty("--progress", `${(item.progress * 100).toFixed(1)}%`);
+    }
   }
 
   private click(key: string, e: MouseEvent): void {
@@ -172,7 +194,7 @@ export class QueuePanel {
   private paint(): void {
     const t = breathePhase(performance.now() - this.started);
     for (const item of this.items) {
-      const row = this.rowEls.get(item.key);
+      const row = this.rowEls.get(item.key)?.row;
       if (!row) continue;
       const selected = this.selected.has(item.key);
       const base = selected ? ROW_BG_SELECTED : baseBg(item.state);

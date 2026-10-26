@@ -36,9 +36,11 @@ import { MenuBar, signOut } from "./menus";
 import { drawCells } from "./overlay";
 import { QueuePanel, SamplesPanel, type QueueItem, type Readiness } from "./panels";
 import { moveSelection, type Move } from "./queueOrder";
+import { QueueView } from "../queue/view";
 import { askRescanParams, RescanReview, SweepRunner } from "./rescan";
 import { LogPane, StatusBar } from "./statusbar";
 import type { TiledImage } from "./tiles";
+import { UploadPanel } from "./uploadPanel";
 import type {
   Bootstrap,
   Cell,
@@ -65,14 +67,18 @@ export interface PageConfig {
   projectId: string;
   projectsUrl: string;
   settingsUrl: string;
-  queueUrl: string;
   accountSettingsUrl: string;
   logoutUrl: string;
   manageUrl: string;
   csrfToken: string;
+  /** Django messages waiting for this page (e.g. "Project renamed."). */
+  messages: string;
 }
 
 const CURSORS: Record<Mode, string> = { review: "pointer", draw: "crosshair", delete: "not-allowed", rescan: "crosshair" };
+
+/** What the main area shows (View menu): the review screen, the GPU queue, or the log. */
+type View = "review" | "queue" | "log";
 
 interface CompositeView {
   sampleId: string;
@@ -98,6 +104,9 @@ export class Workspace implements InteractionHost {
   private readonly saver: CellSaver;
   private readonly lease: EditLease;
   private readonly uploads: UploadManager;
+  private readonly uploadPanel = new UploadPanel();
+  private readonly queueView: QueueView;
+  private readonly queuePane: HTMLElement;
 
   private samples: SampleInfo[] = [];
   private ui: UiState;
@@ -122,7 +131,7 @@ export class Workspace implements InteractionHost {
   private segmentingPaused = false;
   private pollFailures = 0;
   private pollTimer = 0;
-  private showingLog = false;
+  private view: View = "review";
   private uiSaveTimer = 0;
   private needsFit = true;
 
@@ -145,7 +154,19 @@ export class Workspace implements InteractionHost {
     };
     this.layout.canvasHost.append(this.viewer.root);
     splitPanes(this.layout.left, this.samplesPanel.root, this.queuePanel.root);
+    this.uploadPanel.onToggle = () => (this.uploads.paused ? this.uploads.resume() : this.uploads.pause());
+    this.uploadPanel.onClose = () => this.uploads.dismissSummary();
     this.layout.root.insertBefore(this.log.root, this.layout.folderInput);
+    this.queueView = new QueueView({
+      isStaff: boot.me.is_staff,
+      csrfToken: config.csrfToken,
+      onStatus: (message) => this.view === "queue" && this.statusbar.setMessage(message),
+    });
+    this.queuePane = document.createElement("section");
+    this.queuePane.className = "ws-queue-view content";
+    this.queuePane.hidden = true;
+    this.queuePane.append(this.queueView.root);
+    this.layout.root.insertBefore(this.queuePane, this.layout.folderInput);
 
     this.saver = new CellSaver({
       onConflict: (id) => void this.reloadAfterConflict(id),
@@ -160,11 +181,11 @@ export class Workspace implements InteractionHost {
     });
     this.lease = new EditLease((state) => this.leaseChanged(state));
     this.uploads = new UploadManager(boot.id, {
-      changed: () => this.refreshQueueAndDots(),
-      status: (message, active) => {
-        this.statusbar.setMessage(message);
-        if (active) this.statusbar.setState("processing");
+      changed: () => {
+        this.refreshQueueAndDots();
+        this.renderUploadProgress();
       },
+      problem: (title, message) => void info(title, message),
       log: (message) => this.log.append(message),
       uploaded: () => void this.refreshSamples(),
       confirmReplace: (names) => confirmAction("Changed Files",
@@ -175,7 +196,7 @@ export class Workspace implements InteractionHost {
     });
 
     this.menus = this.buildMenus();
-    host.replaceChildren(this.menus.root, this.layout.root, this.statusbar.root);
+    host.replaceChildren(this.menus.root, this.layout.root, this.uploadPanel.root, this.statusbar.root);
     document.title = `${boot.name} — Cell Counts`;
 
     this.wireToolbar();
@@ -189,6 +210,7 @@ export class Workspace implements InteractionHost {
     this.renderSamples();
     this.syncToolbar();
     this.selectInitialImage();
+    if (config.messages) this.statusbar.setMessage(config.messages);
     void this.poll();
   }
 
@@ -248,9 +270,11 @@ export class Workspace implements InteractionHost {
       {
         label: "View",
         items: [
-          { label: () => (this.showingLog ? "Show Review" : "Show Log"), action: () => this.toggleLog() },
-          { label: "GPU Queue", action: () => window.open(this.config.queueUrl, "_blank", "noopener") },
-          { label: "Fit to Window", action: () => this.fit(), separatorBefore: true },
+          { label: "Show Review", action: () => this.setView("review"), enabled: () => this.view !== "review" },
+          { label: "Show GPU Queue", action: () => this.setView("queue"), enabled: () => this.view !== "queue" },
+          { label: "Show Log", action: () => this.setView("log"), enabled: () => this.view !== "log" },
+          { label: "Fit to Window", action: () => this.fit(), enabled: () => this.view === "review",
+            separatorBefore: true },
         ],
       },
       {
@@ -329,6 +353,15 @@ export class Workspace implements InteractionHost {
       if (isDialogOpen() || isTypingTarget(e.target)) return;
       const mod = e.ctrlKey || e.metaKey;
       const key = e.key.toLowerCase();
+      if (mod && key === "o") {
+        e.preventDefault();
+        if (this.canEdit) this.addImages();
+        return;
+      }
+      if (this.view !== "review") {
+        if (e.key === "Escape") this.setView("review");
+        return;
+      }
       if (mod && key === "z") {
         e.preventDefault();
         if (e.shiftKey) this.redoEdit();
@@ -336,9 +369,6 @@ export class Workspace implements InteractionHost {
       } else if (mod && key === "y") {
         e.preventDefault();
         this.redoEdit();
-      } else if (mod && key === "o") {
-        e.preventDefault();
-        if (this.canEdit) this.addImages();
       } else if (e.key === "Escape") {
         if (this.rescanReview) this.discardRescan();
         else this.interactions.reset();
@@ -375,7 +405,7 @@ export class Workspace implements InteractionHost {
       e.preventDefault();
       depth = 0;
       hint.classList.remove("visible");
-      void filesFromDrop(e.dataTransfer).then((found) => this.addFound(found));
+      void this.addFound(filesFromDrop(e.dataTransfer));
     });
   }
 
@@ -453,9 +483,16 @@ export class Workspace implements InteractionHost {
     }
     const local = [...this.uploads.items].sort((a, b) => Number(b.phase === "uploading") - Number(a.phase === "uploading"));
     for (const item of local) {
-      items.push({ key: item.key, label: label(item.prefix, item.channel),
-        state: item.phase === "uploading" ? "uploading" : "waiting",
-        title: item.phase === "uploading" ? "Uploading now" : "Waiting to upload" });
+      const pct = `${Math.floor(item.fraction * 100)}%`;
+      const uploading = item.phase === "uploading";
+      items.push({
+        key: item.key,
+        label: label(item.prefix, item.channel),
+        state: uploading ? "uploading" : "waiting",
+        title: uploading ? "Uploading now" : item.phase === "hashing" ? "Checking the file" : "Waiting to upload",
+        detail: uploading ? pct : item.phase === "hashing" ? `checking ${pct}` : item.sent ? `${pct} sent` : "",
+        progress: uploading || item.sent ? item.fraction : undefined,
+      });
     }
     this.queuePanel.setItems(items);
     this.updateLight();
@@ -653,8 +690,8 @@ export class Workspace implements InteractionHost {
     this.syncToolbar();
     this.updateScene();
     this.updateInfoPanel();
+    this.statusbar.setMessage("");
     if (image.status === "done") void this.loadCells(image, sameImage);
-    else this.statusbar.setMessage(statusLine(image));
   }
 
   /** review.py _apply_viewport: keep pan/zoom within a sample (its channels are
@@ -678,7 +715,6 @@ export class Workspace implements InteractionHost {
     if (cached && (keepEdits || cached.version >= image.cells_version || this.saver.isDirty(image.id))) {
       store = cached;
     } else {
-      this.statusbar.setMessage(`Loading ${image.filename}...`);
       try {
         const data = await get<CellsResponse>(`/api/images/${image.id}/cells`);
         store = new CellStore(image.id, data.version, data.cells);
@@ -699,9 +735,10 @@ export class Workspace implements InteractionHost {
     this.syncToolbar();
     this.updateScene();
     this.updateInfoPanel();
-    this.statusbar.setMessage(`${image.filename} — ${store.size} cell(s)`
-      + (this.leaseState && !this.leaseState.heldByMe && this.leaseState.holder
-        ? ` — ${this.leaseState.holder} is editing this image (view only)` : ""));
+    // Only worth a status line when it changes what you can do here.
+    if (this.leaseState && !this.leaseState.heldByMe && this.leaseState.holder) {
+      this.statusbar.setMessage(`${this.leaseState.holder} is editing this image — view only.`);
+    }
   }
 
   private async reloadCells(image: ImageInfo, message: string): Promise<void> {
@@ -755,7 +792,7 @@ export class Workspace implements InteractionHost {
     this.saveUi({ last_image_id: snap.id });
     this.syncToolbar();
     this.samplesPanel.update(this.readiness, prefix);
-    this.statusbar.setMessage(`Loading composite for ${prefix}...`);
+    this.statusbar.setMessage("");
 
     const seq = ++this.loadSeq;
     try {
@@ -780,7 +817,6 @@ export class Workspace implements InteractionHost {
       };
       this.updateScene();
       this.updateInfoPanel();
-      this.statusbar.setMessage(`Composite — ${prefix}`);
     } catch (err) {
       if (seq === this.loadSeq) this.statusbar.setMessage(`Couldn't load the composite: ${errorMessage(err)}`);
     }
@@ -888,13 +924,30 @@ export class Workspace implements InteractionHost {
     }
   }
 
-  private toggleLog(): void {
-    this.showingLog = !this.showingLog;
-    // Like the desktop app, the log replaces the whole review area, toolbar included.
-    this.layout.main.hidden = this.showingLog;
-    this.layout.toolbar.hidden = this.showingLog;
-    this.log.root.hidden = !this.showingLog;
+  /** Like the desktop app's Show Log / Show Review: the log (and now the GPU
+   * queue) replace the whole review area, toolbar included — in place, so an
+   * upload in progress carries on. */
+  private setView(view: View): void {
+    if (view === this.view) return;
+    this.view = view;
+    this.layout.main.hidden = view !== "review";
+    this.layout.toolbar.hidden = view !== "review";
+    this.log.root.hidden = view !== "log";
+    this.queuePane.hidden = view !== "queue";
+    if (view === "queue") this.queueView.show();
+    else this.queueView.hide();
+    if (view === "review") this.viewer.requestRender();
     this.menus.refresh();
+  }
+
+  private renderUploadProgress(): void {
+    const p = this.uploads.progress();
+    this.uploadPanel.update(p);
+    const working = p.stage === "working";
+    const fraction = p.bytesTotal ? p.bytesDone / p.bytesTotal : 0;
+    // In the tab title too, for when the page is in a background tab.
+    const base = `${this.boot.name} — Cell Counts`;
+    document.title = working ? `(${p.paused ? "stopped" : `${Math.floor(fraction * 100)}%`}) ${base}` : base;
   }
 
   // ------------------------------------------------------------------ //
@@ -1105,11 +1158,12 @@ export class Workspace implements InteractionHost {
     this.layout.folderInput.click();
   }
 
-  private async addFound(found: FoundFile[]): Promise<void> {
-    if (!found.length) return;
-    this.statusbar.setMessage("Scanning folder...");
-    const scan = await scanFiles(found);
-    await this.uploads.add(scan);
+  /** Show "Reading folder…" straight away: walking a big dropped folder, and
+   * reading desktop review files, can take a while before anything uploads. */
+  private async addFound(found: FoundFile[] | Promise<FoundFile[]>): Promise<void> {
+    this.uploads.beginScan();
+    const files = await found;
+    await this.uploads.add(await scanFiles(files));
   }
 
   private async exportData(): Promise<void> {

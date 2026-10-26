@@ -92,6 +92,42 @@ export async function request<T>(
   return data as T;
 }
 
+/** PUT a blob and report bytes sent as they go. fetch() can't report upload
+ * progress, and a 32 MB chunk on a slow connection takes long enough that a
+ * progress bar which only moves between chunks looks stuck. */
+export function putWithProgress(url: string, body: Blob, onProgress: (loaded: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("X-CSRFToken", csrf());
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.upload.addEventListener("progress", (e) => onProgress(e.loaded));
+    xhr.addEventListener("error", () => reject(new ApiError(0, "network", "Could not reach the server.")));
+    xhr.addEventListener("timeout", () => reject(new ApiError(0, "network", "The server took too long to answer.")));
+    xhr.addEventListener("load", () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress(body.size);
+        resolve();
+        return;
+      }
+      let data: Record<string, unknown> = {};
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        data = {};
+      }
+      if (xhr.status === 401) {
+        window.location.assign(`/accounts/login/?next=${encodeURIComponent(location.pathname)}`);
+      }
+      const code = typeof data.error === "string" ? data.error : `http_${xhr.status}`;
+      const detail = typeof data.detail === "string" && data.detail ? data.detail : xhr.statusText;
+      reject(new ApiError(xhr.status, code, detail, data));
+    });
+    xhr.send(body);
+  });
+}
+
 export const get = <T>(url: string, options?: RequestOptions) => request<T>("GET", url, undefined, options);
 export const post = <T>(url: string, body?: unknown, options?: RequestOptions) =>
   request<T>("POST", url, body ?? {}, options);

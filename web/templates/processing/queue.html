@@ -8,47 +8,7 @@
 {% block content %}
 {{ overview|json_script:"queue-initial" }}
 <div id="queue-page" data-is-staff="{{ user.is_staff|yesno:'true,false' }}">
-  <section class="panel">
-    <header>
-      <h2>GPU</h2>
-      <button type="button" id="toggle-my-pause">Stop My Segmenting</button>
-      {% if user.is_staff %}<button type="button" id="toggle-gpu-pause">Pause GPU</button>{% endif %}
-    </header>
-    <div class="body">
-      <p id="gpu-state" class="light" data-state="idle">Loading…</p>
-      <p class="muted">Everyone shares one GPU. Rescans run first, since someone is waiting on them; after that,
-      people take turns, one image each. Use ▲ / ▼ in a project's Queue panel to choose which of your own images
-      go first.</p>
-    </div>
-  </section>
-
-  <section class="panel">
-    <header><h2>Waiting</h2></header>
-    <table class="list">
-      <thead><tr><th>Person</th><th class="num">Images queued</th><th>Next one starts</th></tr></thead>
-      <tbody id="queue-people"></tbody>
-    </table>
-  </section>
-
-  <section class="panel">
-    <header>
-      <h2>{% if user.is_staff %}All queued jobs{% else %}Your queued jobs{% endif %}</h2>
-      <button type="button" id="cancel-selected" disabled>Cancel Selected</button>
-    </header>
-    <table class="list">
-      <thead>
-        <tr>
-          <th class="check-col"><input type="checkbox" id="select-all" aria-label="Select all"></th>
-          <th class="num">Order</th>
-          <th>Image</th>
-          <th class="hide-narrow">Project</th>
-          {% if user.is_staff %}<th>Person</th>{% endif %}
-          <th>Starts</th>
-        </tr>
-      </thead>
-      <tbody id="queue-jobs"></tbody>
-    </table>
-  </section>
+  <noscript>The GPU Queue needs JavaScript.</noscript>
 </div>
 {% endblock %}
 {% block status %}<span id="queue-status">GPU queue</span>{% endblock %}

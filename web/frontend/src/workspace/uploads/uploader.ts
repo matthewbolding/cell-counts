@@ -12,20 +12,26 @@
 // the server (uploaded earlier without them), the cells are imported into it,
 // unless someone has already reviewed that image in the web app.
 //
+// Folders can be tens of gigabytes, so progress is tracked for the whole batch —
+// files and bytes done, what's being hashed and uploaded right now, speed and
+// time left — and published through progress() for the Uploads panel.
+//
 // Interruptions are expected — closing the laptop, flaky Wi-Fi, the tab
 // closing. Every chunk is retried with backoff; anything not finished when the
 // page goes away resumes the next time the folder is added, because `init`
 // reports which chunks the server already has.
 
-import { ApiError, errorMessage, post, request, sleep } from "../api";
+import { ApiError, errorMessage, post, putWithProgress, request, sleep } from "../api";
 import type { Channel } from "../constants";
-import type { ImageInfo } from "../types";
 import { moveSelection, type Move } from "../queueOrder";
+import type { ImageInfo } from "../types";
 import { hashFile } from "./hasher";
 import { desktopMatch, readDesktopCells, type DesktopRef, type Recognized, type ScanResult } from "./scan";
 
 const CHUNK_RETRY_MS = [1000, 2000, 5000, 10000, 20000, 30000];
 const MAX_CHUNK_ATTEMPTS = 8;
+const RATE_WINDOW_MS = 20_000; // speed is averaged over this much recent uploading
+const NOTIFY_MS = 200; // at most this often for progress-only updates
 
 type Phase = "hash" | "hashing" | "conflict" | "ready" | "uploading";
 
@@ -43,6 +49,26 @@ export interface UploadItem {
   totalChunks?: number;
   present?: Set<number>;
   desktop: DesktopRef | null;
+  /** 0..1 — hashing progress while hashing, upload progress while uploading. */
+  fraction: number;
+  /** Bytes of this file already on the server (finished chunks). */
+  sent: number;
+}
+
+export interface UploadProgress {
+  stage: "idle" | "scanning" | "checking" | "working" | "done";
+  paused: boolean;
+  filesTotal: number; // files in this batch that needed checking
+  filesDone: number; // ...uploaded, found identical, left as they were, or failed
+  failed: number;
+  bytesTotal: number; // bytes this batch has to upload (shrinks as identical files turn up)
+  bytesDone: number;
+  hashed: number;
+  hashing: { name: string; fraction: number } | null;
+  uploading: { name: string; fraction: number } | null;
+  bytesPerSecond: number | null;
+  etaSeconds: number | null;
+  summary: string | null; // set once a batch finishes
 }
 
 interface PlanFile {
@@ -50,6 +76,15 @@ interface PlanFile {
   decision: "unchanged" | "needs_hash";
   image_id: string | null;
   sha256: string | null;
+}
+
+interface InitResponse {
+  action: "upload" | "skip";
+  upload_id?: string;
+  chunk_size?: number;
+  total_chunks?: number;
+  chunks_present?: number[];
+  image?: ImageInfo;
 }
 
 interface ImportSummary {
@@ -64,18 +99,12 @@ interface ImportResponse {
   image?: ImageInfo;
 }
 
-interface InitResponse {
-  action: "upload" | "skip";
-  upload_id?: string;
-  chunk_size?: number;
-  total_chunks?: number;
-  chunks_present?: number[];
-  image?: ImageInfo;
-}
-
 export interface UploadEvents {
+  /** Something changed: items, phases, or just progress (throttled). */
   changed(): void;
-  status(message: string, active: boolean): void;
+  /** Something the person has to know about (shown as a dialog). Progress is
+   * never reported this way: it's all in progress(), shown by the upload strip. */
+  problem(title: string, message: string): void;
   log(message: string): void;
   uploaded(image: ImageInfo): void;
   /** Ask once about every file whose content differs from what's on the server. */
@@ -83,17 +112,23 @@ export interface UploadEvents {
   quotaExceeded(message: string): void;
 }
 
-interface Totals {
+interface Batch {
+  filesTotal: number;
+  filesDone: number;
+  bytesTotal: number;
+  bytesDone: number; // finished chunks, including ones the server already had
+  hashed: number;
   upToDate: number;
   uploaded: number;
   failed: number;
   kept: number;
-  hashed: number;
-  toHash: number;
-  desktop: number; // images whose desktop review work was brought in
+  desktop: number;
 }
 
-const newTotals = (): Totals => ({ upToDate: 0, uploaded: 0, failed: 0, kept: 0, hashed: 0, toHash: 0, desktop: 0 });
+const newBatch = (): Batch => ({
+  filesTotal: 0, filesDone: 0, bytesTotal: 0, bytesDone: 0, hashed: 0, upToDate: 0, uploaded: 0, failed: 0,
+  kept: 0, desktop: 0,
+});
 
 export class UploadManager {
   items: UploadItem[] = [];
@@ -103,8 +138,14 @@ export class UploadManager {
   private hashing = false;
   private uploading = false;
   private importing = 0;
-  private totals = newTotals();
+  private stage: UploadProgress["stage"] = "idle";
+  private summary: string | null = null;
+  private batch = newBatch();
+  private inFlight = 0; // bytes of the chunk being sent right now
+  private readonly meter = new RateMeter(RATE_WINDOW_MS);
+  private sentThisSession = 0; // bytes actually sent (excludes resumed chunks), for the speed
   private resumeWaiters: (() => void)[] = [];
+  private notifyTimer = 0;
 
   constructor(projectId: string, events: UploadEvents) {
     this.projectId = projectId;
@@ -112,12 +153,54 @@ export class UploadManager {
   }
 
   get active(): boolean {
-    return this.items.length > 0;
+    return this.items.length > 0 || this.stage === "scanning" || this.stage === "checking";
   }
 
   /** For the readiness dots: a file for this slot is waiting or uploading. */
   isPending(prefix: string, channel: Channel): boolean {
     return this.items.some((i) => i.prefix === prefix && i.channel === channel);
+  }
+
+  progress(): UploadProgress {
+    const b = this.batch;
+    const hashingItem = this.items.find((i) => i.phase === "hashing");
+    const uploadingItem = this.items.find((i) => i.phase === "uploading");
+    const rate = this.meter.rate();
+    const bytesDone = Math.min(b.bytesTotal, b.bytesDone + this.inFlight);
+    const remaining = Math.max(0, b.bytesTotal - bytesDone);
+    return {
+      stage: this.stage,
+      paused: this.paused,
+      filesTotal: b.filesTotal,
+      filesDone: b.filesDone,
+      failed: b.failed,
+      bytesTotal: b.bytesTotal,
+      bytesDone,
+      hashed: b.hashed,
+      hashing: hashingItem ? { name: hashingItem.name, fraction: hashingItem.fraction } : null,
+      uploading: uploadingItem ? { name: uploadingItem.name, fraction: uploadingItem.fraction } : null,
+      bytesPerSecond: rate,
+      etaSeconds: rate && !this.paused ? remaining / rate : null,
+      summary: this.summary,
+    };
+  }
+
+  /** The Uploads panel's Close button after a batch has finished. */
+  dismissSummary(): void {
+    if (this.stage !== "done") return;
+    this.stage = "idle";
+    this.summary = null;
+    this.events.changed();
+  }
+
+  /** The folder picker returned; reading a big folder's entries takes a moment. */
+  beginScan(): void {
+    if (this.stage === "idle" || this.stage === "done") {
+      this.batch = newBatch();
+      this.summary = null;
+    }
+    this.stage = "scanning";
+    this.events.changed();
   }
 
   pause(): void {
@@ -127,6 +210,7 @@ export class UploadManager {
 
   resume(): void {
     this.paused = false;
+    this.meter.reset(); // don't average the pause into the speed
     for (const wake of this.resumeWaiters.splice(0)) wake();
     this.events.changed();
     this.kick();
@@ -149,20 +233,26 @@ export class UploadManager {
     }
     for (const name of duplicates) this.events.log(`Skipped ${name}: another file in this folder has the same sample and channel.`);
     if (!recognized.length) {
-      this.events.status("No {PREFIX}_{CCK,CHR,SNAP}.tif files found in that folder.", false);
+      this.stage = this.items.length ? "working" : "idle";
+      this.events.problem("Add Images", "There are no image files named like A1_SNAP.tif, A1_CCK.tif or A1_CHR.tif "
+        + "in that folder.");
+      this.events.changed();
       return;
     }
 
     const already = new Set(this.items.map((i) => i.name));
     const fresh = recognized.filter((r) => !already.has(r.name));
-    this.events.status(`Checking ${fresh.length} image(s) against the server…`, true);
+    this.stage = "checking";
+    this.events.changed();
     let plan: { files: PlanFile[] };
     try {
       plan = await post(`/api/projects/${this.projectId}/uploads/plan`, {
         files: fresh.map((r) => ({ name: r.name, size: r.file.size, last_modified: r.file.lastModified })),
       });
     } catch (err) {
-      this.events.status(`Couldn't start the upload: ${errorMessage(err)}`, false);
+      this.stage = this.items.length ? "working" : "idle";
+      this.events.problem("Add Images", `The upload couldn't start: ${errorMessage(err)}`);
+      this.events.changed();
       return;
     }
 
@@ -180,15 +270,17 @@ export class UploadManager {
         continue;
       }
       this.items.push(this.newItem(r));
+      this.batch.filesTotal++;
+      this.batch.bytesTotal += r.file.size;
     }
-    this.totals.upToDate += unchanged;
-    this.totals.toHash += fresh.length - unchanged;
+    this.batch.upToDate += unchanged;
     if (scan.desktopFolders) {
       this.events.log(`Found desktop review data (${scan.desktopFolders} cellcounts.json file(s)); it will be `
         + "brought in for every image whose file hasn't changed since.");
     }
     this.events.log(`Found ${recognized.length} recognized image(s); ${unchanged} already up to date, `
-      + `${fresh.length - unchanged} to check.`);
+      + `${fresh.length - unchanged} to check (${formatBytes(this.batch.bytesTotal)}).`);
+    this.stage = "working";
     this.events.changed();
     this.importing++;
     this.kick();
@@ -202,12 +294,21 @@ export class UploadManager {
 
   private newItem(r: Recognized): UploadItem {
     return { key: `upload:${r.name}`, name: r.name, prefix: r.prefix, channel: r.channel, file: r.file,
-      phase: "hash", replace: false, desktop: r.desktop };
+      phase: "hash", replace: false, desktop: r.desktop, fraction: 0, sent: 0 };
   }
 
   private kick(): void {
     if (!this.hashing) void this.hashLoop();
     if (!this.uploading) void this.uploadLoop();
+  }
+
+  /** Progress-only change: coalesce bursts (chunk progress fires constantly). */
+  private notify(): void {
+    if (this.notifyTimer) return;
+    this.notifyTimer = window.setTimeout(() => {
+      this.notifyTimer = 0;
+      this.events.changed();
+    }, NOTIFY_MS);
   }
 
   // ------------------------------------------------------------------ //
@@ -232,8 +333,8 @@ export class UploadManager {
             c.replace = true;
             c.phase = "hash";
           } else {
-            this.remove(c);
-            this.totals.kept++;
+            this.batch.kept++;
+            this.settle(c);
           }
         }
         this.events.changed();
@@ -247,17 +348,20 @@ export class UploadManager {
   private async hashAndInit(item: UploadItem): Promise<void> {
     if (!item.sha256) {
       item.phase = "hashing";
-      this.totals.hashed++;
-      const label = `Hashing ${item.name} (${this.totals.hashed}/${this.totals.toHash})`;
-      this.events.status(label, true);
+      item.fraction = 0;
+      this.batch.hashed++;
+      this.events.changed();
       try {
         item.sha256 = await hashFile(item.file, (f) => {
-          if (f < 1) this.events.status(`${label} — ${Math.round(f * 100)}%`, true);
+          item.fraction = f;
+          this.notify();
         });
       } catch (err) {
         this.fail(item, `couldn't read the file (${errorMessage(err)})`);
         return;
       }
+      item.phase = "hash";
+      item.fraction = 0;
     }
     await this.init(item);
   }
@@ -269,8 +373,8 @@ export class UploadManager {
         last_modified: item.file.lastModified, replace: item.replace,
       });
       if (r.action === "skip") {
-        this.remove(item);
-        this.totals.upToDate++;
+        this.batch.upToDate++;
+        this.settle(item);
         const ref = desktopMatch(item.desktop, item.sha256);
         if (ref && r.image) await this.importIntoExisting(item.name, r.image.id, item.sha256!, ref);
         return;
@@ -279,6 +383,11 @@ export class UploadManager {
       item.chunkSize = r.chunk_size;
       item.totalChunks = r.total_chunks;
       item.present = new Set(r.chunks_present ?? []);
+      // Chunks the server already has (an interrupted upload resuming) count as done.
+      const resumed = [...item.present].reduce((sum, i) => sum + this.chunkLength(item, i), 0);
+      this.batch.bytesDone += resumed - item.sent;
+      item.sent = resumed;
+      item.fraction = item.file.size ? resumed / item.file.size : 0;
       item.phase = "ready";
       this.events.changed();
       if (!this.uploading) void this.uploadLoop();
@@ -312,12 +421,16 @@ export class UploadManager {
         try {
           await this.sendChunks(item);
           const image = await this.complete(item);
-          this.remove(item);
-          this.totals.uploaded++;
+          this.batch.uploaded++;
+          this.settle(item, false);
           this.events.uploaded(image);
         } catch (err) {
+          this.inFlight = 0;
           if (err instanceof ApiError && err.status === 404) {
             // The server forgot this upload (abandoned for a week): start over.
+            this.batch.bytesDone -= item.sent;
+            item.sent = 0;
+            item.fraction = 0;
             item.phase = "hash";
             item.uploadId = undefined;
             if (!this.hashing) void this.hashLoop();
@@ -333,8 +446,13 @@ export class UploadManager {
   }
 
   private waitForResume(): Promise<void> {
-    this.events.status("Uploads stopped. Process › Start Uploads to continue.", false);
+    this.events.changed();
     return new Promise((resolve) => this.resumeWaiters.push(resolve));
+  }
+
+  private chunkLength(item: UploadItem, index: number): number {
+    const size = item.chunkSize!;
+    return Math.max(0, Math.min(size, item.file.size - index * size));
   }
 
   private async sendChunks(item: UploadItem): Promise<void> {
@@ -343,22 +461,37 @@ export class UploadManager {
     for (let index = 0; index < total; index++) {
       if (item.present!.has(index)) continue;
       if (this.paused) await this.waitForResume();
-      this.events.status(`Uploading ${item.name}: chunk ${index + 1}/${total}`, true);
       const blob = item.file.slice(index * size, Math.min(item.file.size, (index + 1) * size));
       for (let attempt = 0; ; attempt++) {
         try {
-          await request("PUT", `/api/uploads/${item.uploadId}/chunks/${index}`, undefined,
-            { raw: blob, headers: { "Content-Type": "application/octet-stream" } });
+          await putWithProgress(`/api/uploads/${item.uploadId}/chunks/${index}`, blob, (loaded) => {
+            this.inFlight = loaded;
+            item.fraction = item.file.size ? (item.sent + loaded) / item.file.size : 1;
+            this.recordRate(loaded);
+            this.notify();
+          });
+          this.inFlight = 0;
+          this.recordRate(0, blob.size);
           item.present!.add(index);
+          item.sent += blob.size;
+          this.batch.bytesDone += blob.size;
           break;
         } catch (err) {
+          this.inFlight = 0;
           if (!(err instanceof ApiError) || !err.isRetryable || attempt + 1 >= MAX_CHUNK_ATTEMPTS) throw err;
           const wait = CHUNK_RETRY_MS[Math.min(attempt, CHUNK_RETRY_MS.length - 1)];
-          this.events.status(`Upload of ${item.name} interrupted; retrying in ${Math.round(wait / 1000)} s…`, true);
+          this.meter.reset(); // the strip shows "waiting for the connection" meanwhile
           await sleep(wait);
         }
       }
     }
+  }
+
+  /** Bytes actually sent over time, for speed and time left. `inChunk` is how
+   * far into the current chunk we are; `finished` closes out a chunk. */
+  private recordRate(inChunk: number, finished = 0): void {
+    this.sentThisSession += finished;
+    this.meter.record(this.sentThisSession + inChunk, performance.now());
   }
 
   private async complete(item: UploadItem): Promise<ImageInfo> {
@@ -390,7 +523,7 @@ export class UploadManager {
   }
 
   private logImport(name: string, summary: ImportSummary): void {
-    this.totals.desktop++;
+    this.batch.desktop++;
     this.events.log(`${name}: brought in ${summary.cells} reviewed cell(s) from the desktop app`
       + (summary.skipped ? ` (${summary.skipped} couldn't be read and were left out).` : "."));
   }
@@ -415,38 +548,102 @@ export class UploadManager {
   }
 
   // ------------------------------------------------------------------ //
-  private remove(item: UploadItem): void {
+  /** A file leaves the line. Unless it was uploaded, its unsent bytes come off
+   * the batch total so the bar measures what's actually going up. */
+  private settle(item: UploadItem, dropUnsent = true): void {
+    if (dropUnsent) this.batch.bytesTotal -= item.file.size - item.sent;
+    this.batch.filesDone++;
     this.items = this.items.filter((i) => i !== item);
     this.events.changed();
   }
 
   private fail(item: UploadItem, message: string): void {
     this.events.log(`ERROR uploading ${item.name}: ${message}`);
-    this.totals.failed++;
-    this.remove(item);
+    this.batch.failed++;
+    this.settle(item);
   }
 
   private stopAll(message: string): void {
     const dropped = this.items.filter((i) => i.phase !== "uploading");
-    this.items = this.items.filter((i) => i.phase === "uploading");
-    this.totals.failed += dropped.length;
+    for (const item of dropped) {
+      this.batch.failed++;
+      this.settle(item);
+    }
     this.events.log(`${message} ${dropped.length} file(s) were not uploaded.`);
-    this.events.changed();
     this.events.quotaExceeded(message);
   }
 
   private finishIfIdle(): void {
     if (this.hashing || this.uploading || this.importing || this.items.length) return;
-    const t = this.totals;
-    if (t.uploaded + t.failed + t.upToDate + t.kept + t.desktop === 0) return;
-    const parts = [`${t.uploaded} uploaded`, `${t.upToDate} already up to date`];
-    if (t.desktop) parts.push(`desktop review work brought in for ${t.desktop}`);
-    if (t.kept) parts.push(`${t.kept} changed file(s) left as they were`);
-    if (t.failed) parts.push(`${t.failed} failed — see View › Show Log`);
-    this.events.status(`Done. ${parts.join(", ")}.`, false);
+    if (this.stage === "scanning" || this.stage === "checking") return;
+    const b = this.batch;
+    if (b.uploaded + b.failed + b.upToDate + b.kept + b.desktop === 0) {
+      this.stage = "idle";
+      this.events.changed();
+      return;
+    }
+    const parts = [`${b.uploaded} uploaded`];
+    if (b.uploaded) parts[0] += ` (${formatBytes(b.bytesDone)})`;
+    parts.push(`${b.upToDate} already up to date`);
+    if (b.desktop) parts.push(`desktop review work brought in for ${b.desktop}`);
+    if (b.kept) parts.push(`${b.kept} changed file(s) left as they were`);
+    if (b.failed) parts.push(`${b.failed} failed — see View › Show Log`);
+    this.summary = `Done. ${parts.join(", ")}.`;
+    this.stage = "done";
     this.events.log(`Finished: ${parts.join(", ")}.`);
-    this.totals = newTotals();
+    this.batch = newBatch();
+    this.meter.reset();
+    this.events.changed();
   }
+}
+
+/** Upload speed over a sliding window of recent samples of total bytes sent. */
+export class RateMeter {
+  private samples: { t: number; bytes: number }[] = [];
+  private readonly windowMs: number;
+
+  constructor(windowMs: number) {
+    this.windowMs = windowMs;
+  }
+
+  record(totalBytes: number, nowMs: number): void {
+    this.samples.push({ t: nowMs, bytes: totalBytes });
+    while (this.samples.length > 2 && nowMs - this.samples[0].t > this.windowMs) this.samples.shift();
+  }
+
+  /** Bytes per second, or null until there are at least 2 s of samples. */
+  rate(): number | null {
+    const s = this.samples;
+    if (s.length < 2) return null;
+    const seconds = (s[s.length - 1].t - s[0].t) / 1000;
+    if (seconds < 2) return null;
+    return Math.max(0, s[s.length - 1].bytes - s[0].bytes) / seconds;
+  }
+
+  reset(): void {
+    this.samples = [];
+  }
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+export function formatDuration(seconds: number): string {
+  if (seconds < 60) return "less than a minute";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `about ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `about ${hours} h ${rest} min` : `about ${hours} h`;
 }
 
 async function gzipJson(value: unknown): Promise<Blob> {

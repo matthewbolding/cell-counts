@@ -11,10 +11,10 @@
      data-project-id="{{ project.id }}"
      data-projects-url="{% url 'projects:list' %}"
      data-settings-url="{% url 'projects:settings' project.id %}"
-     data-queue-url="{% url 'processing:queue_page' %}"
      data-account-settings-url="{% url 'accounts:settings' %}"
      data-logout-url="{% url 'account_logout' %}"
-     data-manage-url="{% if user.is_staff %}{% url 'accounts:manage_users' %}{% endif %}">
+     data-manage-url="{% if user.is_staff %}{% url 'accounts:manage_users' %}{% endif %}"
+     data-messages="{% for message in messages %}{{ message }}{% if not forloop.last %} {% endif %}{% endfor %}">
   <noscript>The review screen needs JavaScript.</noscript>
 </div>
 {% endblock %}
