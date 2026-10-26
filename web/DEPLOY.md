@@ -130,16 +130,63 @@ again.
 
 ## 4. Backups and restore
 
-`backup` writes a `pg_dump` to `/mnt/cellcounts/backups/` every night at 03:00 and keeps the last 14. The database
-holds what can't be recreated: accounts and every review edit. The TIFFs are on the NAS, and researchers keep
-their own originals; tiles can always be rebuilt.
+Everything lands in `/mnt/cellcounts/backups/` on the NAS:
 
-- **Take one now:** `docker compose run --rm backup --once`
-- **Off-site copy:** the NAS's RAID protects against a dead disk, not a dead NAS, a fire, or a bad delete. Copy
-  `/mnt/cellcounts/backups` somewhere else regularly; the dumps are small. For example, run an `rclone sync` to
-  Cloudflare R2 or Backblaze B2 from a cron job.
+| What | Written | Kept |
+|------|---------|------|
+| `wal/` | Continuously: Postgres sends every finished WAL file, and starts a new one at least once a minute while anything changes | Back to the oldest base backup |
+| `base/<stamp>/` | Nightly at 03:00: a full base backup | Last 7 |
+| `cellcounts-<stamp>.dump` | Nightly at 03:00: a `pg_dump` | Last 14 |
 
-**Restore** (practice this once before you need it):
+So at most about a minute of review edits is ever not on the NAS, and the database can be put back as it was at any
+moment of the last week. The database holds what can't be recreated: accounts and every review edit. The TIFFs are
+on the NAS, and researchers keep their own originals; tiles can always be rebuilt.
+
+- **Take a backup now:** `docker compose run --rm backup --once` (base backup and dump, then a check that WAL
+  archiving is healthy).
+- **Check archiving:** each night's log ends with `backup: WAL archiving ok, last …` (`docker compose logs backup`).
+  If the NAS is away, Postgres keeps the WAL on the server's disk and catches up when it's back; the nightly check
+  reports `FAILING` meanwhile.
+- **Practise a restore:** `sh restore-drill.sh` rebuilds the database from the newest base backup plus the archived
+  WAL in a throwaway container with no network, and compares it with the live one. Nothing live is touched.
+- **Off-site:** the NAS sits next to the server, so it doesn't protect against a fire or theft. If that matters, copy
+  `/mnt/cellcounts/backups` elsewhere regularly (e.g. `rclone sync` to Cloudflare R2 or Backblaze B2 from cron).
+
+**Restore to the latest moment, or to an earlier one.** These are the steps `restore-drill.sh` runs, applied to the
+real database volume:
+
+```sh
+cd ~/cell-counts/web/deploy
+docker compose stop web cpu-worker gpu-worker backup db
+
+# Keep the current database aside first, in case you want it back.
+docker run --rm -v cellcounts_pgdata:/from:ro -v /mnt/cellcounts/backups:/to postgres:17.11-trixie \
+    tar -czf "/to/pgdata-before-restore-$(date +%Y%m%d-%H%M%S).tar.gz" -C /from .
+
+# Replace it with the newest base backup (or choose an older backups/base/<stamp>).
+BASE=$(ls -1d /mnt/cellcounts/backups/base/2* | sort | tail -n 1)
+docker run --rm -v cellcounts_pgdata:/data -v "$BASE":/base:ro postgres:17.11-trixie sh -c '
+    find /data -mindepth 1 -delete &&
+    tar -xzf /base/base.tar.gz -C /data && tar -xzf /base/pg_wal.tar.gz -C /data/pg_wal &&
+    touch /data/recovery.signal &&
+    echo "restore_command = '"'"'gzip -dc /backups/wal/%f.gz > %p'"'"'" >> /data/postgresql.auto.conf &&
+    chown -R postgres:postgres /data'
+
+# Starting db replays the archived WAL to the end, then opens for writes.
+docker compose up -d db
+docker compose logs db | grep -E "redo done|last completed transaction|ready to accept"
+docker compose up -d
+```
+
+To stop at an earlier moment instead (say, just before a bad delete), add these two lines to `postgresql.auto.conf`
+in the same step as `restore_command`:
+
+```
+recovery_target_time = '2026-10-26 14:30:00 America/Chicago'
+recovery_target_action = 'promote'
+```
+
+**Restore a nightly dump** instead (simpler, but only to 03:00 that night):
 
 ```sh
 cd ~/cell-counts/web/deploy

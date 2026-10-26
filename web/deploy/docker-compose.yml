@@ -12,8 +12,9 @@
 #   backend  web, workers, db, backup — internal: no internet at all
 #
 # The NAS is mounted on the host (DEPLOY.md, "NAS mount") at ${NAS_MOUNT} and
-# bind-mounted at /data wherever files are read or written. Postgres is on a
-# local named volume, never the NAS.
+# bind-mounted at /data wherever files are read or written. Postgres keeps its
+# data on a local named volume; only its backups (WAL archive, base backups,
+# dumps) go to the NAS, under backups/.
 
 name: cellcounts
 
@@ -53,6 +54,22 @@ x-app: &app
 services:
   db:
     image: postgres:17.11-trixie
+    # Continuous backup: every finished WAL file goes to the NAS (archive-wal.sh),
+    # and a new one is started at least once a minute while anything changes, so
+    # at most about a minute of edits is ever not on the NAS. backup.sh adds a
+    # nightly base backup to restore from; DEPLOY.md section 4.
+    command:
+      - postgres
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=sh /etc/postgresql/archive-wal.sh %p %f
+      - -c
+      - archive_timeout=60
+      - -c
+      - wal_compression=on
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -60,6 +77,9 @@ services:
       TZ: ${TZ:-America/Chicago}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./postgres/archive-wal.sh:/etc/postgresql/archive-wal.sh:ro
+      - ${NAS_MOUNT:-/mnt/cellcounts}/backups:/backups
     shm_size: 256mb
     networks: [backend]
     healthcheck:
@@ -209,6 +229,7 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
       BACKUP_HOUR: ${BACKUP_HOUR:-3}
       BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      BASE_BACKUP_KEEP: ${BASE_BACKUP_KEEP:-7}
       TZ: ${TZ:-America/Chicago}
     volumes:
       - ./backup.sh:/backup.sh:ro

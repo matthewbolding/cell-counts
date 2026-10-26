@@ -53,7 +53,7 @@ browser ── HTTPS ── Cloudflare ── Tunnel ── cloudflared ─┐  
 | `originals/<project_id>/<image_id>.tif` | Verified source TIFF |
 | `tiles/<image_id>/<rev>/<level>/<col>_<row>.png` | 512 px grayscale tiles, level 0 = full resolution |
 | `exports/<export_id>.xlsx` | Generated exports, deleted after 24 h |
-| `backups/` | Nightly database dumps (last 14 kept) |
+| `backups/` | Database backups: the continuous WAL archive, nightly base backups (last 7) and dumps (last 14) |
 
 ## Accounts and security
 
