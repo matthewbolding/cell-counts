@@ -1,10 +1,15 @@
 // uploader.ts — File › Add Images…, end to end (DESIGN.md, "Upload flow").
 //
 // Mirrors the desktop client's two concurrent halves: a hashing loop (plan → hash
-// → init) and an upload loop (chunks → complete) run side by side, so the first
+// → init) and the uploading (chunks → complete) run side by side, so the first
 // file starts uploading while later ones are still being hashed. The plan step
 // is the desktop's fast path: a file whose name, size and modification time
 // match what's already on the server is trusted without hashing.
+//
+// Several chunks go up at once, each in its own "lane"; LaneTuner picks how
+// many for this connection. Lanes take chunks in queue order, so the tail of
+// one file overlaps the start of the next, and a file is completed as soon as
+// its last chunk lands.
 //
 // Desktop review work rides along: if the folder has the desktop app's
 // cellcounts.json and .cells.json files and a file's recorded sha256 matches,
@@ -26,6 +31,7 @@ import type { Channel } from "../constants";
 import { moveSelection, type Move } from "../queueOrder";
 import type { ImageInfo } from "../types";
 import { hashFile } from "./hasher";
+import { LaneTuner } from "./laneTuner";
 import { desktopMatch, readDesktopCells, type DesktopRef, type Recognized, type ScanResult } from "./scan";
 
 const CHUNK_RETRY_MS = [1000, 2000, 5000, 10000, 20000, 30000];
@@ -48,6 +54,13 @@ export interface UploadItem {
   chunkSize?: number;
   totalChunks?: number;
   present?: Set<number>;
+  /** Chunks not handed to a lane yet, in order. */
+  queue?: number[];
+  /** Cancels this file's chunk requests when it's given up on. */
+  cancel?: AbortController;
+  /** Bumped whenever the file's upload is given up on or started over, so
+   * requests still finishing for the old attempt are ignored. */
+  attempt: number;
   desktop: DesktopRef | null;
   /** 0..1 — hashing progress while hashing, upload progress while uploading. */
   fraction: number;
@@ -65,7 +78,8 @@ export interface UploadProgress {
   bytesDone: number;
   hashed: number;
   hashing: { name: string; fraction: number } | null;
-  uploading: { name: string; fraction: number } | null;
+  /** The first file going up, and how many others are going up alongside it. */
+  uploading: { name: string; fraction: number; others: number } | null;
   bytesPerSecond: number | null;
   etaSeconds: number | null;
   summary: string | null; // set once a batch finishes
@@ -136,20 +150,24 @@ export class UploadManager {
   private readonly projectId: string;
   private readonly events: UploadEvents;
   private hashing = false;
-  private uploading = false;
+  private lanesRunning = 0;
+  private completing = 0;
   private importing = 0;
   private stage: UploadProgress["stage"] = "idle";
   private summary: string | null = null;
   private batch = newBatch();
-  private inFlight = 0; // bytes of the chunk being sent right now
+  /** Chunk requests on the wire, by file, attempt and index: bytes sent so far. */
+  private readonly wire = new Map<string, { item: UploadItem; loaded: number }>();
   private readonly meter = new RateMeter(RATE_WINDOW_MS);
+  private readonly tuner: LaneTuner;
   private sentThisSession = 0; // bytes actually sent (excludes resumed chunks), for the speed
   private resumeWaiters: (() => void)[] = [];
   private notifyTimer = 0;
 
-  constructor(projectId: string, events: UploadEvents) {
+  constructor(projectId: string, events: UploadEvents, tuner = new LaneTuner()) {
     this.projectId = projectId;
     this.events = events;
+    this.tuner = tuner;
   }
 
   get active(): boolean {
@@ -164,9 +182,10 @@ export class UploadManager {
   progress(): UploadProgress {
     const b = this.batch;
     const hashingItem = this.items.find((i) => i.phase === "hashing");
-    const uploadingItem = this.items.find((i) => i.phase === "uploading");
+    const uploadingItems = this.items.filter((i) => i.phase === "uploading");
+    const first = uploadingItems[0];
     const rate = this.meter.rate();
-    const bytesDone = Math.min(b.bytesTotal, b.bytesDone + this.inFlight);
+    const bytesDone = Math.min(b.bytesTotal, b.bytesDone + this.inFlightBytes());
     const remaining = Math.max(0, b.bytesTotal - bytesDone);
     return {
       stage: this.stage,
@@ -178,7 +197,7 @@ export class UploadManager {
       bytesDone,
       hashed: b.hashed,
       hashing: hashingItem ? { name: hashingItem.name, fraction: hashingItem.fraction } : null,
-      uploading: uploadingItem ? { name: uploadingItem.name, fraction: uploadingItem.fraction } : null,
+      uploading: first ? { name: first.name, fraction: first.fraction, others: uploadingItems.length - 1 } : null,
       bytesPerSecond: rate,
       etaSeconds: rate && !this.paused ? remaining / rate : null,
       summary: this.summary,
@@ -211,12 +230,13 @@ export class UploadManager {
   resume(): void {
     this.paused = false;
     this.meter.reset(); // don't average the pause into the speed
+    this.tuner.restart(performance.now());
     for (const wake of this.resumeWaiters.splice(0)) wake();
     this.events.changed();
     this.kick();
   }
 
-  /** ▲/▼ in the Queue panel for local rows. The file uploading right now stays put. */
+  /** ▲/▼ in the Queue panel for local rows. Files already uploading stay put. */
   reorder(keys: Set<string>, how: Move): void {
     const fixed = this.items.filter((i) => i.phase === "uploading");
     const movable = this.items.filter((i) => i.phase !== "uploading");
@@ -294,12 +314,12 @@ export class UploadManager {
 
   private newItem(r: Recognized): UploadItem {
     return { key: `upload:${r.name}`, name: r.name, prefix: r.prefix, channel: r.channel, file: r.file,
-      phase: "hash", replace: false, desktop: r.desktop, fraction: 0, sent: 0 };
+      phase: "hash", replace: false, attempt: 0, desktop: r.desktop, fraction: 0, sent: 0 };
   }
 
   private kick(): void {
     if (!this.hashing) void this.hashLoop();
-    if (!this.uploading) void this.uploadLoop();
+    this.pump();
   }
 
   /** Progress-only change: coalesce bursts (chunk progress fires constantly). */
@@ -390,7 +410,7 @@ export class UploadManager {
       item.fraction = item.file.size ? resumed / item.file.size : 0;
       item.phase = "ready";
       this.events.changed();
-      if (!this.uploading) void this.uploadLoop();
+      this.pump();
     } catch (err) {
       if (err instanceof ApiError && err.code === "changed") {
         item.phase = "conflict";
@@ -407,42 +427,54 @@ export class UploadManager {
   }
 
   // ------------------------------------------------------------------ //
-  // Upload half: chunks → complete
+  // Upload half: chunks → complete, several chunks at a time
   // ------------------------------------------------------------------ //
-  private async uploadLoop(): Promise<void> {
-    this.uploading = true;
+  /** Start lanes until there are as many as the tuner wants, or no more work. */
+  private pump(): void {
+    while (this.lanesRunning < this.tuner.lanes && this.hasWork()) {
+      this.lanesRunning++;
+      void this.lane();
+    }
+  }
+
+  private hasWork(): boolean {
+    return this.items.some((i) => i.phase === "ready" || (i.phase === "uploading" && i.queue!.length > 0));
+  }
+
+  /** One chunk at a time, until there's nothing left or the tuner wants fewer lanes. */
+  private async lane(): Promise<void> {
     try {
       for (;;) {
-        const item = this.items.find((i) => i.phase === "ready");
-        if (!item) break;
         if (this.paused) await this.waitForResume();
-        item.phase = "uploading";
-        this.events.changed();
-        try {
-          await this.sendChunks(item);
-          const image = await this.complete(item);
-          this.batch.uploaded++;
-          this.settle(item, false);
-          this.events.uploaded(image);
-        } catch (err) {
-          this.inFlight = 0;
-          if (err instanceof ApiError && err.status === 404) {
-            // The server forgot this upload (abandoned for a week): start over.
-            this.batch.bytesDone -= item.sent;
-            item.sent = 0;
-            item.fraction = 0;
-            item.phase = "hash";
-            item.uploadId = undefined;
-            if (!this.hashing) void this.hashLoop();
-          } else {
-            this.fail(item, errorMessage(err));
-          }
-        }
+        if (this.lanesRunning > this.tuner.lanes) return;
+        const next = this.nextChunk();
+        if (!next) return;
+        await this.sendChunk(next.item, next.index);
       }
     } finally {
-      this.uploading = false;
+      this.lanesRunning--;
       this.finishIfIdle();
     }
+  }
+
+  /** The next chunk in queue order: the files already going up first, then the next file that's ready. */
+  private nextChunk(): { item: UploadItem; index: number } | null {
+    for (const item of this.items) {
+      if (item.phase === "ready") this.startItem(item);
+      if (item.phase === "uploading" && item.queue!.length) return { item, index: item.queue!.shift()! };
+    }
+    return null;
+  }
+
+  private startItem(item: UploadItem): void {
+    item.phase = "uploading";
+    item.cancel = new AbortController();
+    item.queue = [];
+    for (let i = 0; i < item.totalChunks!; i++) if (!item.present!.has(i)) item.queue.push(i);
+    this.tuner.chunkBytes = item.chunkSize!;
+    this.events.changed();
+    // Every chunk arrived before an interruption: only the completion is left.
+    if (!item.queue.length) void this.finishItem(item);
   }
 
   private waitForResume(): Promise<void> {
@@ -455,43 +487,102 @@ export class UploadManager {
     return Math.max(0, Math.min(size, item.file.size - index * size));
   }
 
-  private async sendChunks(item: UploadItem): Promise<void> {
-    const total = item.totalChunks!;
+  private async sendChunk(item: UploadItem, index: number): Promise<void> {
+    const attempt = item.attempt;
     const size = item.chunkSize!;
-    for (let index = 0; index < total; index++) {
-      if (item.present!.has(index)) continue;
-      if (this.paused) await this.waitForResume();
-      const blob = item.file.slice(index * size, Math.min(item.file.size, (index + 1) * size));
-      for (let attempt = 0; ; attempt++) {
-        try {
-          await putWithProgress(`/api/uploads/${item.uploadId}/chunks/${index}`, blob, (loaded) => {
-            this.inFlight = loaded;
-            item.fraction = item.file.size ? (item.sent + loaded) / item.file.size : 1;
-            this.recordRate(loaded);
-            this.notify();
-          });
-          this.inFlight = 0;
-          this.recordRate(0, blob.size);
-          item.present!.add(index);
-          item.sent += blob.size;
-          this.batch.bytesDone += blob.size;
-          break;
-        } catch (err) {
-          this.inFlight = 0;
-          if (!(err instanceof ApiError) || !err.isRetryable || attempt + 1 >= MAX_CHUNK_ATTEMPTS) throw err;
-          const wait = CHUNK_RETRY_MS[Math.min(attempt, CHUNK_RETRY_MS.length - 1)];
-          this.meter.reset(); // the strip shows "waiting for the connection" meanwhile
-          await sleep(wait);
+    const blob = item.file.slice(index * size, Math.min(item.file.size, (index + 1) * size));
+    const key = `${item.key}:${attempt}:${index}`;
+    for (let tries = 0; ; tries++) {
+      this.wire.set(key, { item, loaded: 0 });
+      try {
+        await putWithProgress(`/api/uploads/${item.uploadId}/chunks/${index}`, blob, (loaded) => {
+          if (item.attempt !== attempt) return;
+          this.wire.set(key, { item, loaded });
+          this.progressed(item);
+        }, item.cancel!.signal);
+      } catch (err) {
+        this.wire.delete(key);
+        if (item.attempt !== attempt) return; // the file was given up on meanwhile
+        if (!(err instanceof ApiError) || !err.isRetryable || tries + 1 >= MAX_CHUNK_ATTEMPTS) {
+          this.abandon(item, err);
+          return;
         }
+        this.tuner.backOff(performance.now());
+        this.meter.reset(); // the strip shows "waiting for the connection" meanwhile
+        await sleep(CHUNK_RETRY_MS[Math.min(tries, CHUNK_RETRY_MS.length - 1)]);
+        if (item.attempt !== attempt) return;
+        if (this.paused) await this.waitForResume();
+        continue;
       }
+      this.wire.delete(key);
+      if (item.attempt !== attempt) return;
+      item.present!.add(index);
+      item.sent += blob.size;
+      this.batch.bytesDone += blob.size;
+      this.sentThisSession += blob.size;
+      this.progressed(item);
+      if (item.present!.size === item.totalChunks) void this.finishItem(item);
+      return;
     }
   }
 
-  /** Bytes actually sent over time, for speed and time left. `inChunk` is how
-   * far into the current chunk we are; `finished` closes out a chunk. */
-  private recordRate(inChunk: number, finished = 0): void {
-    this.sentThisSession += finished;
-    this.meter.record(this.sentThisSession + inChunk, performance.now());
+  /** Bytes moved: the file's share, the speed, and the tuner, which may want more lanes. */
+  private progressed(item: UploadItem): void {
+    let inItem = 0;
+    for (const w of this.wire.values()) if (w.item === item) inItem += w.loaded;
+    item.fraction = item.file.size ? (item.sent + inItem) / item.file.size : 1;
+    const now = performance.now();
+    const total = this.sentThisSession + this.inFlightBytes();
+    this.meter.record(total, now);
+    const lanes = this.tuner.lanes;
+    this.tuner.sample(total, now, this.wire.size);
+    if (this.tuner.lanes > lanes) this.pump();
+    this.notify();
+  }
+
+  private inFlightBytes(): number {
+    let n = 0;
+    for (const w of this.wire.values()) n += w.loaded;
+    return n;
+  }
+
+  private async finishItem(item: UploadItem): Promise<void> {
+    const attempt = item.attempt;
+    this.completing++;
+    try {
+      const image = await this.complete(item);
+      if (item.attempt !== attempt) return;
+      this.batch.uploaded++;
+      this.settle(item, false);
+      this.events.uploaded(image);
+    } catch (err) {
+      if (item.attempt === attempt) this.abandon(item, err);
+    } finally {
+      this.completing--;
+      this.finishIfIdle();
+    }
+  }
+
+  /** A chunk or the completion failed for good. The file's other chunks are
+   * cancelled; it starts over if the server forgot the upload, otherwise it fails. */
+  private abandon(item: UploadItem, err: unknown): void {
+    item.attempt++;
+    item.cancel?.abort();
+    for (const [key, w] of this.wire) if (w.item === item) this.wire.delete(key);
+    this.tuner.restart(performance.now());
+    if (err instanceof ApiError && err.status === 404) {
+      // The server forgot this upload (abandoned for a week): start over.
+      this.batch.bytesDone -= item.sent;
+      item.sent = 0;
+      item.fraction = 0;
+      item.phase = "hash";
+      item.uploadId = undefined;
+      item.queue = undefined;
+      this.events.changed();
+      if (!this.hashing) void this.hashLoop();
+    } else {
+      this.fail(item, errorMessage(err));
+    }
   }
 
   private async complete(item: UploadItem): Promise<ImageInfo> {
@@ -574,7 +665,7 @@ export class UploadManager {
   }
 
   private finishIfIdle(): void {
-    if (this.hashing || this.uploading || this.importing || this.items.length) return;
+    if (this.hashing || this.lanesRunning || this.completing || this.importing || this.items.length) return;
     if (this.stage === "scanning" || this.stage === "checking") return;
     const b = this.batch;
     if (b.uploaded + b.failed + b.upToDate + b.kept + b.desktop === 0) {

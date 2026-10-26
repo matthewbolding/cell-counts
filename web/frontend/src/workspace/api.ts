@@ -95,8 +95,13 @@ export async function request<T>(
 /** PUT a blob and report bytes sent as they go. fetch() can't report upload
  * progress, and a 32 MB chunk on a slow connection takes long enough that a
  * progress bar which only moves between chunks looks stuck. */
-export function putWithProgress(url: string, body: Blob, onProgress: (loaded: number) => void): Promise<void> {
+export function putWithProgress(url: string, body: Blob, onProgress: (loaded: number) => void,
+  signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ApiError(0, "aborted", "The upload was cancelled."));
+      return;
+    }
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", url);
     xhr.setRequestHeader("X-CSRFToken", csrf());
@@ -105,6 +110,8 @@ export function putWithProgress(url: string, body: Blob, onProgress: (loaded: nu
     xhr.upload.addEventListener("progress", (e) => onProgress(e.loaded));
     xhr.addEventListener("error", () => reject(new ApiError(0, "network", "Could not reach the server.")));
     xhr.addEventListener("timeout", () => reject(new ApiError(0, "network", "The server took too long to answer.")));
+    xhr.addEventListener("abort", () => reject(new ApiError(0, "aborted", "The upload was cancelled.")));
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
     xhr.addEventListener("load", () => {
       if (xhr.status >= 200 && xhr.status < 300) {
         onProgress(body.size);

@@ -162,8 +162,13 @@ This mirrors the desktop client's scan, then hash, then upload:
    that image's review edits), or returns an upload with the chunks already
    present.
 4. 32 MB chunks are uploaded (`PUT`, below Cloudflare's 100 MB cap), then
-   `complete`. Uploads resume after an interruption: re-adding the folder re-plans,
-   and `init` reports the chunks already on the server.
+   `complete`. Several chunks go up at once, in any order (each lands at its own
+   offset and is recorded with one atomic update). The browser tunes how many to
+   the connection: it adds one while that raises throughput by 10% or more, drops
+   back when it doesn't, halves on a failed chunk, and never lets a chunk take
+   much over 30 s at the measured speed (`laneTuner.ts`). Uploads resume after an
+   interruption: re-adding the folder re-plans, and `init` reports the chunks
+   already on the server.
 5. Desktop review work comes along. Each image is matched to the nearest
    `cellcounts.json` at or above its folder (so a parent of several desktop
    folders works). If the desktop app finished that exact file (status `done`

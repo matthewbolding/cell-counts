@@ -70,7 +70,10 @@ export class UploadPanel {
       parts.push(`${formatBytes(p.bytesPerSecond)}/s`);
       if (p.etaSeconds !== null) parts.push(`${formatDuration(p.etaSeconds)} left`);
     } else if (p.uploading) parts.push("measuring speed…");
-    if (p.uploading) parts.push(`uploading ${p.uploading.name} (${Math.floor(p.uploading.fraction * 100)}%)`);
+    if (p.uploading) {
+      const more = p.uploading.others ? ` and ${p.uploading.others} more` : "";
+      parts.push(`uploading ${p.uploading.name} (${Math.floor(p.uploading.fraction * 100)}%)${more}`);
+    }
     if (p.hashing) {
       parts.push(`checking ${p.hashing.name} (${Math.floor(p.hashing.fraction * 100)}%, ${p.hashed} of ${p.filesTotal})`);
     }
