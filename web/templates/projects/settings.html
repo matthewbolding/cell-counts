@@ -1,6 +1,7 @@
 {% extends "layouts/app.html" %}
 {% block title %}{{ project.name }} settings — Cell Counts{% endblock %}
 {% block status %}{{ project.name }}{% endblock %}
+{% block subtitle %}<span class="project-name">{{ project.name }}</span>{% endblock %}
 {% block content %}
 <p><a href="{% url 'projects:workspace' project.id %}">← Back to {{ project.name }}</a></p>
 

@@ -138,6 +138,7 @@ label { user-select: none; }
   border-bottom: 1px solid var(--border);
 }
 .menubar .app-name { display: flex; align-items: center; padding: 0 10px 0 6px; font-weight: 600; }
+.menubar .project-name { display: flex; align-items: center; padding-right: 10px; color: var(--text-muted); }
 .menubar .spacer { flex: 1; }
 
 .menu { position: relative; display: flex; }
@@ -307,7 +308,8 @@ meter.storage { display: block; width: 100%; height: 10px; }
 .checks label { display: flex; align-items: flex-start; gap: 2px; }
 .checks .help { display: block; margin-left: 22px; color: var(--text-muted); font-size: 12px; }
 .buttons { display: flex; justify-content: flex-end; gap: 6px; margin-top: 16px; }
-.buttons.left { justify-content: flex-start; }
+.buttons.left,
+.panel .buttons { justify-content: flex-start; }
 .inline-form { display: inline-flex; align-items: center; gap: 6px; }
 ul.errorlist { margin: 0; padding: 0; list-style: none; color: var(--danger); font-size: 12px; }
 

@@ -1,0 +1,65 @@
+{% extends "account/base_manage_email.html" %}
+{% load static allauth %}
+{% block head_title %}Email Addresses{% endblock head_title %}
+{% block content %}
+<div class="panel-grid">
+<section class="panel">
+  <header><h2>Email addresses</h2></header>
+  <div class="body">
+    {% if emailaddresses %}
+      <p class="muted">You sign in with your primary address; security notices go there too.</p>
+      {% url 'account_email' as email_url %}
+      {% element form form=form action=email_url method="post" tags="email,list" %}
+        {% slot body %}
+          {% csrf_token %}
+          {% for radio in emailaddress_radios %}
+            {% with emailaddress=radio.emailaddress %}
+              {% element field type="radio" checked=radio.checked name="email" value=emailaddress.email id=radio.id %}
+                {% slot label %}
+                  {{ emailaddress.email }}
+                  {% if emailaddress.verified %}{% element badge tags="success,email,verified" %}Verified{% endelement %}
+                  {% else %}{% element badge tags="warning,email,unverified" %}Unverified{% endelement %}{% endif %}
+                  {% if emailaddress.primary %}{% element badge tags="email,primary" %}Primary{% endelement %}{% endif %}
+                {% endslot %}
+              {% endelement %}
+            {% endwith %}
+          {% endfor %}
+        {% endslot %}
+        {% slot actions %}
+          {% element button type="submit" name="action_primary" %}Make Primary{% endelement %}
+          {% element button tags="secondary" type="submit" name="action_send" %}Re-send Verification{% endelement %}
+          {% element button tags="danger,delete" type="submit" name="action_remove" %}Remove{% endelement %}
+        {% endslot %}
+      {% endelement %}
+    {% else %}
+      {% include "account/snippets/warn_no_email.html" %}
+    {% endif %}
+  </div>
+</section>
+{% if can_add_email %}
+<section class="panel">
+  <header><h2>Add an email address</h2></header>
+  <div class="body">
+    {% url 'account_email' as action_url %}
+    {% element form form=form method="post" action=action_url tags="email,add" %}
+      {% slot body %}
+        {% csrf_token %}
+        {% element fields form=form %}{% endelement %}
+      {% endslot %}
+      {% slot actions %}
+        {% element button name="action_add" type="submit" %}Add Email{% endelement %}
+      {% endslot %}
+    {% endelement %}
+  </div>
+</section>
+{% endif %}
+</div>
+{% endblock content %}
+{% block extra_body %}
+<script src="{% static 'account/js/account.js' %}"></script>
+<script src="{% static 'account/js/onload.js' %}"></script>
+<script data-allauth-onload="allauth.account.forms.manageEmailForm" type="application/json">{
+  "i18n": {"confirmDelete": "Do you really want to remove the selected email address?"}
+}
+</script>
+{% endblock extra_body %}

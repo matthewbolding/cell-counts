@@ -1,3 +1,4 @@
 {% extends "layouts/app.html" %}
 {% block title %}{% block head_title %}{% endblock head_title %} — Cell Counts{% endblock %}
+{% block before_content %}<p><a href="{% url 'accounts:settings' %}">← Back to Settings</a></p>{% endblock %}
 {% block status %}Account{% endblock %}

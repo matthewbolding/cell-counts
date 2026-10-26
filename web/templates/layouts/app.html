@@ -3,6 +3,7 @@
 <div class="app">
   <nav class="menubar" aria-label="Main menu">
     <span class="app-name">Cell Counts</span>
+    {% block subtitle %}{% endblock %}
     {% block menus %}
     <details class="menu">
       <summary>File</summary>
@@ -29,6 +30,7 @@
       {% for message in messages %}<div class="message-bar {{ message.tags }}">{{ message }}</div>{% endfor %}
     </div>
     {% endif %}
+    {% block before_content %}{% endblock %}
     {% block content %}{% endblock %}
   </main>
 

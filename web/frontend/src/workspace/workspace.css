@@ -14,13 +14,6 @@ body.workspace-page { overflow: hidden; }
 }
 #workspace.ws-failed { display: block; padding: 24px; }
 
-.menubar .project-name {
-  display: flex;
-  align-items: center;
-  padding-right: 10px;
-  color: var(--text-muted);
-}
-
 /* Toolbar, then whichever view is showing (review, GPU queue or log) taking
    the rest of the height. */
 .ws {

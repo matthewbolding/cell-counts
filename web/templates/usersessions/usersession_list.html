@@ -1,0 +1,38 @@
+{% extends "usersessions/base_manage.html" %}
+{% load humanize accounts_extras %}
+{% block head_title %}Signed-in Devices{% endblock head_title %}
+{% block content %}
+<section class="panel">
+  <header><h2>Signed-in devices</h2></header>
+  <div class="body">
+    <p class="muted">Everywhere your account is signed in right now.{% if session_count > 1 %} Signing out the
+    others ends those sessions at once; they'll need your password and two-factor code to get back in.{% endif %}</p>
+    {% if session_count > 1 %}{% url 'usersessions_list' as action_url %}{% else %}{% url 'account_logout' as action_url %}{% endif %}
+    <form method="post" action="{{ action_url }}">
+      {% csrf_token %}
+      <table class="list">
+        <thead>
+          <tr>
+            <th>Browser</th><th class="hide-narrow">IP address</th><th>Signed in</th>
+            {% if show_last_seen_at %}<th>Last seen</th>{% endif %}<th></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for session in sessions %}
+          <tr>
+            <td title="{{ session.user_agent }}">{{ session.user_agent|browser }}</td>
+            <td class="hide-narrow mono">{{ session.ip }}</td>
+            <td title="{{ session.created_at }}">{{ session.created_at|naturaltime }}</td>
+            {% if show_last_seen_at %}<td title="{{ session.last_seen_at }}">{{ session.last_seen_at|naturaltime }}</td>{% endif %}
+            <td>{% if session.is_current %}<span class="badge">This device</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <div class="buttons">
+        <button type="submit">{% if session_count > 1 %}Sign Out Other Devices{% else %}Sign Out{% endif %}</button>
+      </div>
+    </form>
+  </div>
+</section>
+{% endblock content %}
