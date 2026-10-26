@@ -179,7 +179,10 @@ services:
 
   cloudflared:
     image: cloudflare/cloudflared:2026.10.3
-    command: ["tunnel", "--no-autoupdate", "run"]
+    # HTTP/2 rather than the default QUIC: measured through this tunnel, QUIC
+    # capped uploads at ~13-25 MB/s however many chunks ran in parallel, while
+    # HTTP/2 went 23-30 MB/s for one and 55-64 MB/s for six.
+    command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "run"]
     # The tunnel token lives in its own file so it never reaches the app
     # containers (they all load .env).
     env_file: tunnel.env

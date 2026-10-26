@@ -58,6 +58,9 @@ In the Cloudflare dashboard: **Zero Trust → Networks → Tunnels → Create a 
 
 Cloudflare Access is deliberately not used. The app's own sign-in has Turnstile, rate limits and mandatory 2FA.
 
+cloudflared is set to connect over HTTP/2 instead of its default QUIC (`--protocol http2` in
+`docker-compose.yml`): through this tunnel, QUIC held uploads to about a third of HTTP/2's speed.
+
 *Optional:* in **Security → WAF → Rate limiting rules**, add a rule for `/accounts/login/`,
 `/accounts/signup/` and `/accounts/password/reset/` (for example, 20 requests per minute per IP, then block for
 10 minutes). The app already rate-limits these routes; this stops floods before they reach the server.
