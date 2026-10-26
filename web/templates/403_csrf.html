@@ -1,0 +1,8 @@
+{% extends "layouts/dialog.html" %}
+{% block title %}Please Try Again — Cell Counts{% endblock %}
+{% block titlebar %}Cell Counts — Please Try Again{% endblock %}
+{% block content %}
+<p>That form couldn't be sent safely, usually because the page was open for a long time or the browser is
+blocking cookies for this site. Go back, reload the page, and try again.</p>
+<div class="buttons"><a class="button" href="{% url 'projects:list' %}">Go to Projects</a></div>
+{% endblock %}

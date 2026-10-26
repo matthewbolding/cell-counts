@@ -1,0 +1,7 @@
+{% extends "layouts/dialog.html" %}
+{% block title %}Bad Request — Cell Counts{% endblock %}
+{% block titlebar %}Cell Counts — Bad Request{% endblock %}
+{% block content %}
+<p>The server couldn't make sense of that request. Go back and try again.</p>
+<div class="buttons"><a class="button" href="{% url 'projects:list' %}">Go to Projects</a></div>
+{% endblock %}

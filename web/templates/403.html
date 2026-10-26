@@ -1,0 +1,8 @@
+{% extends "layouts/dialog.html" %}
+{% block title %}No Access — Cell Counts{% endblock %}
+{% block titlebar %}Cell Counts — No Access{% endblock %}
+{% block content %}
+<p>Your account doesn't have access to this page. If someone shared a project with you, check that you're
+signed in as the account they shared it with.</p>
+<div class="buttons"><a class="button" href="{% url 'projects:list' %}">Go to Projects</a></div>
+{% endblock %}

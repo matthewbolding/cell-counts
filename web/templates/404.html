@@ -1,0 +1,8 @@
+{% extends "layouts/dialog.html" %}
+{% block title %}Page Not Found — Cell Counts{% endblock %}
+{% block titlebar %}Cell Counts — Page Not Found{% endblock %}
+{% block content %}
+<p>There's nothing at this address. The link may be mistyped, or it was for a project that has since been
+deleted or is no longer shared with you.</p>
+<div class="buttons"><a class="button" href="{% url 'projects:list' %}">Go to Projects</a></div>
+{% endblock %}
