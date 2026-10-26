@@ -321,7 +321,7 @@ def complete(session: UploadSession, user, import_data: dict | None) -> tuple[Im
     """Returns the image, plus a summary of any imported review cells."""
     missing = session.missing_chunks()
     if missing:
-        raise ApiError(409, "missing_chunks", f"{len(missing)} chunk(s) haven't arrived yet.",
+        raise ApiError(409, "missing_chunks", f"Some of the file hasn't arrived yet ({len(missing)} missing).",
                        missing=missing[:50])
     staging = storage.staging_path(session.id)
     if not staging.is_file() or staging.stat().st_size != session.size_bytes:

@@ -28,6 +28,7 @@
 
 import { ApiError, errorMessage, post, putWithProgress, request, sleep } from "../api";
 import type { Channel } from "../constants";
+import { plural } from "../dom";
 import { moveSelection, type Move } from "../queueOrder";
 import type { ImageInfo } from "../types";
 import { hashFile } from "./hasher";
@@ -248,7 +249,7 @@ export class UploadManager {
   async add(scan: ScanResult): Promise<void> {
     const { recognized, skipped, duplicates } = scan;
     if (skipped.length) {
-      this.events.log(`Skipped ${skipped.length} file(s) with unrecognized names:`);
+      this.events.log(`Skipped ${plural(skipped.length, "file")} with unrecognized names:`);
       for (const name of skipped) this.events.log(`  - ${name}`);
     }
     for (const name of duplicates) this.events.log(`Skipped ${name}: another file in this folder has the same sample and channel.`);
@@ -295,10 +296,10 @@ export class UploadManager {
     }
     this.batch.upToDate += unchanged;
     if (scan.desktopFolders) {
-      this.events.log(`Found review work in the folder (${scan.desktopFolders} cellcounts.json file(s)); it will be `
+      this.events.log(`Found review work in the folder (${plural(scan.desktopFolders, "cellcounts.json file")}); it will be `
         + "brought in for every image whose file hasn't changed since.");
     }
-    this.events.log(`Found ${recognized.length} recognized image(s); ${unchanged} already up to date, `
+    this.events.log(`Found ${plural(recognized.length, "recognized image")}; ${unchanged} already up to date, `
       + `${fresh.length - unchanged} to check (${formatBytes(this.batch.bytesTotal)}).`);
     this.stage = "working";
     this.events.changed();
@@ -619,7 +620,7 @@ export class UploadManager {
 
   private logImport(name: string, summary: ImportSummary): void {
     this.batch.desktop++;
-    this.events.log(`${name}: brought in ${summary.cells} reviewed cell(s) from its .cells.json file`
+    this.events.log(`${name}: brought in ${plural(summary.cells, "reviewed cell")} from its .cells.json file`
       + (summary.skipped ? ` (${summary.skipped} couldn't be read and were left out).` : "."));
   }
 
@@ -664,7 +665,7 @@ export class UploadManager {
       this.batch.failed++;
       this.settle(item);
     }
-    this.events.log(`${message} ${dropped.length} file(s) were not uploaded.`);
+    this.events.log(`${message} ${plural(dropped.length, "file")} ${dropped.length === 1 ? "was" : "were"} not uploaded.`);
     this.events.quotaExceeded(message);
   }
 
@@ -681,7 +682,7 @@ export class UploadManager {
     if (b.uploaded) parts[0] += ` (${formatBytes(b.bytesDone)})`;
     parts.push(`${b.upToDate} already up to date`);
     if (b.desktop) parts.push(`review work brought in for ${b.desktop}`);
-    if (b.kept) parts.push(`${b.kept} changed file(s) left as they were`);
+    if (b.kept) parts.push(`${plural(b.kept, "changed file")} left as ${b.kept === 1 ? "it was" : "they were"}`);
     if (b.failed) parts.push(`${b.failed} failed — see View › Show Log`);
     this.summary = `Done. ${parts.join(", ")}.`;
     this.stage = "done";

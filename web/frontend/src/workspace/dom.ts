@@ -37,6 +37,11 @@ export function clear(node: Element): void {
   while (node.firstChild) node.firstChild.remove();
 }
 
+/** "1 cell", "3 cells": a count with its noun, for messages people read. */
+export function plural(n: number, noun: string, many = `${noun}s`): string {
+  return `${n} ${n === 1 ? noun : many}`;
+}
+
 export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
 /** "Ctrl+Z" on Windows/Linux, "⌘Z" on macOS — for menu shortcuts and hints. */

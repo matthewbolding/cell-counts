@@ -25,7 +25,7 @@ import {
   type Channel,
 } from "./constants";
 import { confirmAction, info, isDialogOpen, listBox, showDialog } from "./dialogs";
-import { isTypingTarget, shortcut } from "./dom";
+import { isTypingTarget, plural, shortcut } from "./dom";
 import { CellSaver, EditLease, type LeaseState } from "./edits";
 import { askExport, runExport } from "./exportDialog";
 import { normalizeRect, round2, shoelaceAreaCentroid } from "./geometry";
@@ -188,8 +188,11 @@ export class Workspace implements InteractionHost {
       log: (message) => this.log.append(message),
       uploaded: () => void this.refreshSamples(),
       confirmReplace: (names) => confirmAction("Changed Files",
-        [`${names.length} file(s) in this folder differ from the copies already in the project. Replacing them `
-          + "discards their review edits.", listBox(names), "Replace them?"], "Replace", true),
+        [names.length === 1
+          ? "This file differs from the copy already in the project. Replacing it discards its review edits."
+          : `${names.length} files in this folder differ from the copies already in the project. Replacing them `
+            + "discards their review edits.", listBox(names), names.length === 1 ? "Replace it?" : "Replace them?"],
+        "Replace", true),
       quotaExceeded: (message) => void info("Storage Quota", [message,
         "Free up space by deleting a project, or ask your administrator for a larger quota."]),
     });
@@ -892,7 +895,7 @@ export class Workspace implements InteractionHost {
       l.title.textContent = `${this.prefix} — Composite`;
       const res = this.composite?.result;
       l.counts.textContent = res
-        ? `${res.n_pairs ?? 0} coexpressing pair(s)\n${res.snap_kept ?? 0} SNAP kept (population)\n`
+        ? `${plural(res.n_pairs ?? 0, "coexpressing pair")}\n${res.snap_kept ?? 0} SNAP kept (population)\n`
           + `${res.rate_pct === null || res.rate_pct === undefined ? "—" : res.rate_pct.toFixed(1)}% coexpression rate`
         : "Loading…";
       l.notice.textContent = "View only. Edit on the SNAP, CCK or CHR tab.";
@@ -1009,7 +1012,9 @@ export class Workspace implements InteractionHost {
     if (!cells.length) return;
     const choice = await showDialog<"kept" | "filtered" | null>({
       title: "Mark detections",
-      body: `${cells.length} detection(s) selected. Mark them all as cells, or as not cells?`,
+      body: cells.length === 1
+        ? "1 detection selected. Mark it as a cell, or as not a cell?"
+        : `${cells.length} detections selected. Mark them all as cells, or as not cells?`,
       buttons: [
         { label: "Cancel", value: null },
         { label: "Not Cells", value: "filtered" },
@@ -1029,7 +1034,7 @@ export class Workspace implements InteractionHost {
     const cells = this.cellsIn(region);
     if (!cells.length) return;
     this.perform(new RemoveCells(cells));
-    this.statusbar.setMessage(`Deleted ${cells.length} cell(s).`);
+    this.statusbar.setMessage(`Deleted ${plural(cells.length, "cell")}.`);
   }
 
   commitDraw(points: Point[]): void {
@@ -1065,10 +1070,10 @@ export class Workspace implements InteractionHost {
     const runner = new SweepRunner();
     this.rescanRunner = runner;
     const n = params.diameters.length * params.cellprobs.length;
-    this.statusbar.setMessage(`Rescan: waiting for the GPU (${n} combination(s))...`);
+    this.statusbar.setMessage(`Rescan: waiting for the GPU (${plural(n, "combination")})...`);
     try {
       const detail = await runner.run(image.id, clamped, params, (done, total) => {
-        this.statusbar.setMessage(done ? `Rescan: combination ${done}/${total}...` : `Rescan: waiting for the GPU (${total} combination(s))...`);
+        this.statusbar.setMessage(done ? `Rescan: combination ${done}/${total}...` : `Rescan: waiting for the GPU (${plural(total, "combination")})...`);
       });
       const ok = detail.combos.filter((c) => c.status === "done" && c.cells);
       if (!ok.length) {
@@ -1101,8 +1106,8 @@ export class Workspace implements InteractionHost {
     this.updateInfoPanel();
     const anyCells = review.combos.some((c) => (c.cells ?? []).length);
     this.statusbar.setMessage(anyCells
-      ? `Rescan: reviewing ${review.combos.length} combination(s)${failed ? ` (${failed} combination(s) failed)` : ""}.`
-      : `Rescan: no cells found in any of ${review.combos.length} combination(s).`);
+      ? `Rescan: reviewing ${plural(review.combos.length, "combination")}${failed ? ` (${failed} failed)` : ""}.`
+      : `Rescan: no cells found in any of ${plural(review.combos.length, "combination")}.`);
   }
 
   rescanReviewClick(x: number, y: number): void {
@@ -1132,7 +1137,7 @@ export class Workspace implements InteractionHost {
     }));
     this.exitRescanReview();
     this.perform(new AddCells(merged));
-    this.statusbar.setMessage(`Rescan: merged ${merged.length} cell(s).`);
+    this.statusbar.setMessage(`Rescan: merged ${plural(merged.length, "cell")}.`);
   }
 
   private discardRescan(): void {
@@ -1172,10 +1177,10 @@ export class Workspace implements InteractionHost {
     }
     const choice = await askExport(this.samples.map((s) => s.prefix), this.readiness);
     if (!choice) return;
-    this.statusbar.setMessage(`Preparing the export of ${choice.prefixes.length} sample(s)...`);
+    this.statusbar.setMessage(`Preparing the export of ${plural(choice.prefixes.length, "sample")}...`);
     try {
       const filename = await runExport(this.boot.id, choice);
-      this.statusbar.setMessage(`Exported ${choice.prefixes.length} sample(s) to ${filename}`);
+      this.statusbar.setMessage(`Exported ${plural(choice.prefixes.length, "sample")} to ${filename}`);
     } catch (err) {
       void info("Export failed", errorMessage(err));
       this.statusbar.setMessage("Export failed.");
@@ -1200,7 +1205,7 @@ export class Workspace implements InteractionHost {
     if (!imageIds.length) return;
     try {
       const { retried } = await post<{ retried: string[] }>("/api/images/retry", { image_ids: imageIds });
-      this.statusbar.setMessage(`Queued ${retried.length} image(s) to try again.`);
+      this.statusbar.setMessage(`Queued ${plural(retried.length, "image")} to try again.`);
       this.schedulePoll(0);
     } catch (err) {
       this.statusbar.setMessage(`Couldn't retry: ${errorMessage(err)}`);
