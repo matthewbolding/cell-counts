@@ -1,7 +1,7 @@
 // menus.ts — the desktop-style menu bar (File / View / Process, account menu on
 // the right). Same markup as the server-rendered pages (<details class="menu">,
 // styled by app.css), plus what a live app needs: labels that change (Stop
-// Uploads <-> Start Uploads, like app.py), items that enable and disable, and
+// Uploads <-> Start Uploads), items that enable and disable, and
 // keyboard shortcuts shown beside their items.
 
 import { el } from "./dom";

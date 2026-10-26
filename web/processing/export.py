@@ -1,6 +1,5 @@
 """
-export.py — XLSX export, ported from client/export.py with the same sheets,
-headers and rules, reading cells from the database instead of sidecar files:
+export.py — XLSX export, with these sheets, headers and rules:
 
 - one Summary row per requested sample, one Cells row per kept cell;
 - a channel that isn't processed (or doesn't exist for the sample) is `###`

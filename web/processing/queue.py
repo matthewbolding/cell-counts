@@ -66,8 +66,8 @@ def enqueue_segmentation(image, user, params: dict | None = None) -> Job:
 
 
 def cancel_jobs(jobs, reason: str = "Cancelled") -> int:
-    """Cancel queued jobs only; a running job always finishes (same promise the
-    desktop client's Stop Segmenting made)."""
+    """Cancel queued jobs only; a running job always finishes (Stop Segmenting
+    promises that)."""
     return jobs.filter(status=JobStatus.QUEUED).update(
         status=JobStatus.CANCELLED, error=reason, finished_at=timezone.now())
 
@@ -160,8 +160,8 @@ def recover_interrupted(resource: str) -> tuple[int, int]:
 def reorder(user, job_ids: list[str]) -> int:
     """Put the given queued jobs (all the caller's own) into the given order,
     reusing the positions they already hold between them — jobs not named keep
-    their places. Unknown/foreign/non-queued ids are ignored, same as the
-    desktop server's best-effort reorder. Returns how many jobs moved."""
+    their places. Unknown/foreign/non-queued ids are ignored (a best-effort
+    reorder). Returns how many jobs moved."""
     jobs = {str(j.id): j for j in Job.objects.select_for_update().filter(
         id__in=job_ids, user=user, status=JobStatus.QUEUED, priority=PRIORITY_BULK)}
     ordered = [jobs[jid] for jid in dict.fromkeys(str(j) for j in job_ids) if jid in jobs]

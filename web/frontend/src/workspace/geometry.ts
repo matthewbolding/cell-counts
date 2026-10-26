@@ -1,6 +1,6 @@
-// geometry.ts — pure polygon math, ported from the desktop client's geometry.py
-// (same ray-casting test, same shoelace area/centroid and rounding rules), so a
-// hand-drawn cell gets exactly the area/centroid the desktop app would give it.
+// geometry.ts — pure polygon math: a ray-casting point-in-polygon test and the
+// shoelace area/centroid, rounded the same way the server's segmentation rounds
+// them, so a hand-drawn cell gets exactly the area/centroid a detected one would.
 
 import type { Point, Rect } from "./types";
 

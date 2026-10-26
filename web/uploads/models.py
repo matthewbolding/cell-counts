@@ -1,8 +1,8 @@
 """
 models.py — one row per file being uploaded.
 
-Same protocol as the desktop client's server (init / chunk / status / complete),
-with the chunk bookkeeping moved from marker files into Postgres: chunks can
+The protocol is init / chunk / status / complete, with the chunk bookkeeping
+in Postgres: chunks can
 arrive in any order or concurrently, each one is written in place at its offset
 (core.storage.write_at) and recorded here, and `complete` only has to check the
 received set — there's no reassembly copy. Re-initing the same

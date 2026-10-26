@@ -1,5 +1,5 @@
 // Menu bar behaviour for server-rendered pages: menus are <details> elements so
-// they work without JS; this only adds desktop-menu niceties — one menu open at a
+// they work without JS; this only adds the niceties of a desktop menu bar — one menu open at a
 // time, hover-to-switch while a menu is open, and click-outside/Escape to close.
 (() => {
   const menus = () => Array.from(document.querySelectorAll("details.menu"));

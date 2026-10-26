@@ -1,5 +1,5 @@
-// rescan.ts — Rescan mode, after a region is dragged (review.py's
-// _RescanConfigDialog, _run_rescan_sweep and the rescan review state).
+// rescan.ts — Rescan mode, after a region is dragged: the settings dialog, the
+// sweep, and reviewing its proposals.
 //
 // The sweep itself now runs on the server against the original TIFF (no crop
 // upload from the browser): one GPU job per (diameter, cellprob) combination,
@@ -138,7 +138,7 @@ export class RescanReview {
     this.rect = rect;
     this.combos = combos;
     this.entries = combos.map((c) => entriesFor(c.cells ?? []));
-    // Land on the first combination that found anything (review.py does too),
+    // Land on the first combination that found anything,
     // so an empty first combo doesn't look like the whole sweep found nothing.
     const firstHit = combos.findIndex((c) => (c.cells ?? []).length > 0);
     this.index = firstHit >= 0 ? firstHit : 0;

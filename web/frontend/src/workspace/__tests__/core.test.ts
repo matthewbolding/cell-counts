@@ -18,14 +18,14 @@ const square = (id: number, cx: number, cy: number, r = 5, status: Cell["status"
   edited: false,
 });
 
-describe("geometry (ported from geometry.py)", () => {
+describe("geometry", () => {
   it("ray-casts points in and out of a polygon", () => {
     const tri = [[0, 0], [10, 0], [0, 10]];
     expect(pointInPolygon(2, 2, tri)).toBe(true);
     expect(pointInPolygon(8, 8, tri)).toBe(false);
   });
 
-  it("matches the desktop shoelace rounding", () => {
+  it("rounds the shoelace area and centroid like the server", () => {
     expect(shoelaceAreaCentroid([[0, 0], [4, 0], [4, 3], [0, 3]])).toEqual({ area: 12, centroid: [2, 1.5] });
     // Degenerate (collinear) rings fall back to the vertex average.
     expect(shoelaceAreaCentroid([[0, 0], [1, 1], [2, 2]])).toEqual({ area: 0, centroid: [1, 1] });
@@ -51,7 +51,7 @@ describe("GridIndex", () => {
   });
 });
 
-describe("Viewport (review.py's origin/scale model)", () => {
+describe("Viewport (origin/scale model)", () => {
   it("fits by the limiting axis and zooms about a fixed point", () => {
     const v = new Viewport();
     v.resize(800, 600);
@@ -80,7 +80,7 @@ describe("tile pyramid math (matches processing/tiles.py)", () => {
   });
 });
 
-describe("CellStore hit testing (review.py _hit_test)", () => {
+describe("CellStore hit testing", () => {
   it("prefers the smallest containing cell, then the nearest centroid within 10 screen px", () => {
     const store = new CellStore("img", 1, [square(1, 50, 50, 20), square(2, 50, 50, 5), square(3, 200, 200, 2)]);
     expect(store.hitTest(51, 51, 1)?.id).toBe(2);

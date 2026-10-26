@@ -1,7 +1,7 @@
 // edits.ts — getting review edits to the server, and the edit lease that keeps
 // two collaborators from editing one image at once.
 //
-// CellSaver is the web version of review.py's debounced flush: edits apply
+// CellSaver is a debounced flush: edits apply
 // locally at once, their ops (undo.ts) queue per image, and the batch is sent a
 // second after the last edit — or right away when leaving the image or the
 // page. Each image has at most one request in flight, and every batch carries

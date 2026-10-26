@@ -1,5 +1,5 @@
 """The chunked upload protocol: planning, dedupe/replace, quota, resume, chunk
-validation, completion and desktop-sidecar import."""
+validation, completion and .cells.json import."""
 
 from __future__ import annotations
 

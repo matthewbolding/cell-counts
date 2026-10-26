@@ -183,7 +183,7 @@ SECURE_CSP = {
 
 # Uploads stream chunk bodies straight to disk (uploads/views.py reads
 # request.stream), so this limit only bounds ordinary form/JSON posts. The
-# desktop-import path posts a gzipped cells document and raises its own cap.
+# review-file import posts a gzipped cells document and raises its own cap.
 DATA_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
 
 # --------------------------------------------------------------------------- #

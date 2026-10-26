@@ -61,7 +61,7 @@ def chunk(request, upload_id, index):
 def complete(request, upload_id):
     session = _own_session(request, upload_id)
     # The body is optional: only a JSON body (usually gzipped) carries imported
-    # desktop cells; anything else is ignored.
+    # review cells; anything else is ignored.
     import_data = None
     if request.content_type == "application/json":
         import_data = services.read_import_body(request, request.META.get("HTTP_CONTENT_ENCODING", ""))
@@ -77,14 +77,14 @@ def abort(request, upload_id):
 
 @api_view(["POST"])
 def import_cells(request, image_id):
-    """Desktop review data for an image already in the project (see
+    """A folder's review data for an image already in the project (see
     services.import_into_existing). Same body as `complete`, plus the file's
-    sha256 as recorded in the desktop cellcounts.json."""
+    sha256 as recorded in the folder's cellcounts.json."""
     image, _ = get_image_for(request.user, image_id, Role.EDITOR)
     if request.content_type != "application/json":
-        raise ApiError(400, "invalid_import", "Send the desktop review data as JSON.")
+        raise ApiError(400, "invalid_import", "Send the review data as JSON.")
     data = services.read_import_body(request, request.META.get("HTTP_CONTENT_ENCODING", ""))
     if data is None:
-        raise ApiError(400, "invalid_import", "No desktop review data was sent.")
+        raise ApiError(400, "invalid_import", "No review data was sent.")
     return services.import_into_existing(image, request.user, data)
 

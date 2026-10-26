@@ -1,6 +1,6 @@
 // statusbar.ts — the bottom bar: a message on the left narrating what's going on,
-// the connection light on the right (statusbar.py: Idle / Connecting… /
-// Connected / Processing… / Error), and a log pane for View > Show Log.
+// the connection light on the right (Idle / Connecting… / Connected /
+// Processing… / Error), and a log pane for View > Show Log.
 
 import { STATE_LABELS, type LightState } from "./constants";
 import { el } from "./dom";

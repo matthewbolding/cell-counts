@@ -1,5 +1,5 @@
 // dialogs.ts — the review screen's modal dialogs, built on <dialog> and styled
-// like the desktop app's Toplevel dialogs: a title bar, 16 px of padding, and
+// like desktop dialogs: a title bar, 16 px of padding, and
 // right-aligned buttons with the default one rightmost. Esc cancels, Enter
 // presses the default button. Never window.alert/confirm/prompt: those freeze
 // the page (and the uploads running in it) and look nothing like the app.
@@ -46,7 +46,7 @@ export function showDialog<T>(options: DialogOptions<T>): Promise<T> {
       resolve(value);
     };
 
-    // Rightmost is the default, matching the desktop dialogs (Cancel, then OK).
+    // Rightmost is the default, as in desktop dialogs (Cancel, then OK).
     for (const spec of options.buttons) {
       const button = el("button", {
         text: spec.label,

@@ -2,9 +2,8 @@
 images.py — TIFF loading and contrast stretching, shared by tiling (CPU worker)
 and segmentation/rescan (GPU worker).
 
-Ported from server/segment.py's load_grayscale and client/imaging.py's display
-preparation; the memory rules from imaging.py still apply (the corpus runs up to
-13246x10961 uint16): percentiles come from a strided subsample, and the
+Memory rules (the corpus runs up to 13246x10961 uint16): percentiles come
+from a strided subsample, and the
 uint16 -> uint8 rescale runs in fixed-size row bands so the float32 working
 buffer never scales with image size.
 """
@@ -49,8 +48,7 @@ def load_grayscale(path: Path, channel: int | None = None) -> np.ndarray:
 
 
 def contrast_stretch(gray: np.ndarray) -> np.ndarray:
-    """Full-resolution uint8 display array, percentile-stretched exactly like the
-    desktop review screen."""
+    """Full-resolution uint8 display array, percentile-stretched for review."""
     sample = gray[::PERCENTILE_STRIDE, ::PERCENTILE_STRIDE]
     lo, hi = (float(v) for v in np.percentile(sample, PERCENTILE_RANGE))
     if hi <= lo:

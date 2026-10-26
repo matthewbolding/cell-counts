@@ -1,5 +1,5 @@
-// queueOrder.ts — the Queue panel's ▲ / ▼ / ▲▲ / ▼▼ moves, ported from the
-// desktop client's processing_queue.py. A multi-selection moves as a block: the
+// queueOrder.ts — the Queue panel's ▲ / ▼ / ▲▲ / ▼▼ moves. A multi-selection
+// moves as a block: the
 // selected items keep their order relative to each other and shift together.
 // Pure functions over keys, so they're easy to test and apply equally to the
 // local upload line and to the server's queue.

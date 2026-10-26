@@ -1,6 +1,6 @@
-// overlay.ts — cell outlines and masks, ported from rendering.py.
+// overlay.ts — cell outlines and masks.
 //
-// Same visual rules: kept cells in the channel color, filtered cells in a fixed
+// Kept cells in the channel color, filtered cells in a fixed
 // neutral gray, masks at alpha 110/255, outline width clamp(round(1.5 * scale),
 // 1, 4) screen px, and the level-of-detail cutoff — a cell under 8 screen px
 // across is drawn as a dot sized to its footprint instead of its full ring.

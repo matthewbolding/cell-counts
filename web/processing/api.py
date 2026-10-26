@@ -28,7 +28,7 @@ from projects.access import get_image_for, get_project_for
 from projects.models import Image, ImageStatus, Role
 
 MAX_RESCAN_COMBOS = 25
-MIN_RESCAN_SIZE = 10           # image px per side, same as the desktop client
+MIN_RESCAN_SIZE = 10           # image px per side
 MAX_RESCAN_PIXELS = 4096 * 4096
 MAX_EXPORT_PREFIXES = 10_000
 

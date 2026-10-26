@@ -1,8 +1,8 @@
 // panels.ts — the left column: Samples (with SNAP/CCK/CHR readiness dots) above
 // the Queue (everything still outstanding, in processing order). Both are
-// review.py's hand-rolled row lists: plain rows, selection as a solid
-// #cce0ff fill, status in color only. Queue rows "breathe" (a slow eased fade,
-// review.py's _breathe_phase) while something is happening to them right now.
+// hand-rolled row lists: plain rows, selection as a solid #cce0ff fill, status
+// in color only. Queue rows "breathe" (a slow eased fade) while something is
+// happening to them right now.
 
 import {
   CHANNELS,
@@ -203,7 +203,7 @@ export class QueuePanel {
     }
   }
 
-  /** The breathing runs only while some row is active, at review.py's 60 ms
+  /** The breathing runs only while some row is active, on a 60 ms
    * tick (a full-rate animation frame loop would be wasted on a slow fade). */
   private syncAnimation(): void {
     const any = this.items.some((i) => isActive(i.state));

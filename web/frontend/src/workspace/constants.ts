@@ -1,6 +1,5 @@
-// constants.ts — the desktop client's tuning numbers and palette, kept verbatim
-// (review.py, rendering.py, statusbar.py) so the web review screen looks and
-// behaves the same. Change them here, not inline.
+// constants.ts — the review screen's tuning numbers and palette, all in one
+// place. Change them here, not inline.
 
 export type Channel = "SNAP" | "CCK" | "CHR";
 export const CHANNELS: readonly Channel[] = ["SNAP", "CCK", "CHR"];
@@ -15,7 +14,7 @@ export const STATE_LABELS: Record<LightState, string> = {
   error: "Error",
 };
 
-// review.py viewport / gesture tuning
+// Viewport / gesture tuning
 export const MIN_SCALE = 0.01;
 export const MAX_SCALE = 10;
 export const ZOOM_STEP = 1.25;
@@ -28,7 +27,7 @@ export const DEFAULT_RESCAN_DIAMETERS = "0, 15, 30";
 export const DEFAULT_RESCAN_CELLPROBS = "-2, 0, 2";
 export const MAX_RESCAN_COMBOS = 25;
 
-// review.py queue row colors
+// Queue row colors
 export const ROW_BG = "#f0f0f0";
 export const ROW_BG_SELECTED = "#cce0ff";
 export const QUEUE_UPLOADING_ACTIVE_BG = "#fff2cc";
@@ -36,7 +35,7 @@ export const QUEUE_SEGMENTING_ACTIVE_BG = "#b7e6b0";
 export const QUEUE_SERVER_QUEUED_BG = "#e2e6f5";
 export const QUEUE_BREATHE_PERIOD_MS = 3200;
 
-// rendering.py
+// Cell drawing
 export const FILTERED_COLOR = "rgba(140, 140, 140, 0.784)"; // (140,140,140,200)
 export const IN_PROGRESS_COLOR = "#ffdd00";
 export const MASK_FILL_ALPHA = 110 / 255;
@@ -45,7 +44,7 @@ export const OUTLINE_WIDTH_MIN = 1;
 export const OUTLINE_WIDTH_MAX = 4;
 export const LOD_MIN_SCREEN_PX = 8;
 
-// review.py fixed attention colors
+// Fixed attention colors
 export const COEXPRESS_HIGHLIGHT_COLOR = "#ffffff";
 export const RESCAN_PROPOSED_COLOR = "#ffdd00";
 export const RESCAN_ACCEPTED_COLOR = "#00e676";
@@ -61,6 +60,6 @@ export const DEFAULT_CHANNEL_COLORS: Record<Channel, string> = {
 // Polling / saving cadence
 export const STATUS_POLL_VISIBLE_MS = 2000;
 export const STATUS_POLL_HIDDEN_MS = 10000;
-export const SAVE_IDLE_MS = 1000; // review.py FLUSH_IDLE_SECONDS
+export const SAVE_IDLE_MS = 1000; // edits are sent this long after the last one
 export const UI_STATE_SAVE_MS = 800;
 export const LOCK_RENEW_MS = 20000;

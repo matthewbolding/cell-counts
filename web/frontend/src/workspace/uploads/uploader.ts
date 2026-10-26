@@ -1,17 +1,17 @@
 // uploader.ts — File › Add Images…, end to end (DESIGN.md, "Upload flow").
 //
-// Mirrors the desktop client's two concurrent halves: a hashing loop (plan → hash
-// → init) and the uploading (chunks → complete) run side by side, so the first
-// file starts uploading while later ones are still being hashed. The plan step
-// is the desktop's fast path: a file whose name, size and modification time
-// match what's already on the server is trusted without hashing.
+// Two halves run side by side: a hashing loop (plan → hash → init) and the
+// uploading (chunks → complete), so the first file starts uploading while later
+// ones are still being hashed. The plan step is the fast path: a file whose
+// name, size and modification time match what's already on the server is
+// trusted without hashing.
 //
 // Several chunks go up at once, each in its own "lane"; LaneTuner picks how
 // many for this connection. Lanes take chunks in queue order, so the tail of
 // one file overlaps the start of the next, and a file is completed as soon as
 // its last chunk lands.
 //
-// Desktop review work rides along: if the folder has the desktop app's
+// Review work already in the folder rides along: if the folder has
 // cellcounts.json and .cells.json files and a file's recorded sha256 matches,
 // its cells go up with it and it isn't re-segmented. If the file is already on
 // the server (uploaded earlier without them), the cells are imported into it,
@@ -283,7 +283,7 @@ export class UploadManager {
       const d = decisions.get(r.name);
       if (d?.decision === "unchanged") {
         unchanged++;
-        // Already on the server, so it won't be hashed: match desktop review
+        // Already on the server, so it won't be hashed: match the folder's review
         // data against the server's copy of the hash instead.
         const ref = desktopMatch(r.desktop, d.sha256);
         if (ref && d.image_id && d.sha256) toImport.push({ name: r.name, imageId: d.image_id, sha256: d.sha256, ref });
@@ -295,7 +295,7 @@ export class UploadManager {
     }
     this.batch.upToDate += unchanged;
     if (scan.desktopFolders) {
-      this.events.log(`Found desktop review data (${scan.desktopFolders} cellcounts.json file(s)); it will be `
+      this.events.log(`Found review work in the folder (${scan.desktopFolders} cellcounts.json file(s)); it will be `
         + "brought in for every image whose file hasn't changed since.");
     }
     this.events.log(`Found ${recognized.length} recognized image(s); ${unchanged} already up to date, `
@@ -601,7 +601,7 @@ export class UploadManager {
         return r.image;
       } catch (err) {
         if (!(err instanceof ApiError) || !err.code.startsWith("invalid_import")) throw err;
-        this.events.log(`${item.name}: the desktop review data couldn't be read (${err.message}); it will be segmented fresh.`);
+        this.events.log(`${item.name}: its review data couldn't be read (${err.message}); it will be segmented fresh.`);
       }
     }
     return (await post<{ image: ImageInfo }>(url)).image;
@@ -619,11 +619,11 @@ export class UploadManager {
 
   private logImport(name: string, summary: ImportSummary): void {
     this.batch.desktop++;
-    this.events.log(`${name}: brought in ${summary.cells} reviewed cell(s) from the desktop app`
+    this.events.log(`${name}: brought in ${summary.cells} reviewed cell(s) from its .cells.json file`
       + (summary.skipped ? ` (${summary.skipped} couldn't be read and were left out).` : "."));
   }
 
-  /** A file that's already on the server, with matching desktop review data
+  /** A file that's already on the server, with matching review data
    * that the server doesn't have yet (uploads/services.import_into_existing). */
   private async importIntoExisting(name: string, imageId: string, sha256: string, ref: DesktopRef): Promise<void> {
     const imported = await this.desktopCells(name, ref);
@@ -680,7 +680,7 @@ export class UploadManager {
     const parts = [`${b.uploaded} uploaded`];
     if (b.uploaded) parts[0] += ` (${formatBytes(b.bytesDone)})`;
     parts.push(`${b.upToDate} already up to date`);
-    if (b.desktop) parts.push(`desktop review work brought in for ${b.desktop}`);
+    if (b.desktop) parts.push(`review work brought in for ${b.desktop}`);
     if (b.kept) parts.push(`${b.kept} changed file(s) left as they were`);
     if (b.failed) parts.push(`${b.failed} failed — see View › Show Log`);
     this.summary = `Done. ${parts.join(", ")}.`;

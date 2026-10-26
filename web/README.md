@@ -1,8 +1,7 @@
 # Cell Counts web app
 
-The browser version of Cell Counts: researchers sign in at cellcounts.matthewbolding.com, add a folder of
-`{PREFIX}_{CCK,CHR,SNAP}.tif` images to a project, and review, rescan and export cells there. It replaces the
-desktop client (`../client`) and the single-user compute server (`../server`).
+Cell Counts in the browser: researchers sign in at cellcounts.matthewbolding.com, add a folder of
+`{PREFIX}_{CCK,CHR,SNAP}.tif` images to a project, and review, rescan and export cells there.
 
 - [DESIGN.md](DESIGN.md) — architecture, security model, data model, scheduling, JSON API
 - [DEPLOY.md](DEPLOY.md) — production setup on the GPU server, updates, backups, security checklist

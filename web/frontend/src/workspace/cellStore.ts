@@ -1,8 +1,8 @@
-// cellStore.ts — one image's cells in memory: the cells themselves (desktop
-// sidecar shape), their bounding boxes, and a spatial index over them, plus the
-// queries the review screen needs (hit test, rectangle/lasso selection, counts).
-// Hit-testing follows review.py: the smallest cell whose outline contains the
-// point wins; failing that, the nearest centroid within 10 screen px.
+// cellStore.ts — one image's cells in memory: the cells themselves (the
+// `.cells.json` shape), their bounding boxes, and a spatial index over them, plus
+// the queries the review screen needs (hit test, rectangle/lasso selection,
+// counts). Hit-testing: the smallest cell whose outline contains the point wins;
+// failing that, the nearest centroid within 10 screen px.
 
 import { bboxOf, pointInAnyRing, pointInPolygon } from "./geometry";
 import { GridIndex } from "./spatialIndex";
@@ -94,7 +94,7 @@ export class CellStore {
     return hitTest(this.query([x - 10 / scale, y - 10 / scale, x + 10 / scale, y + 10 / scale]), x, y, scale);
   }
 
-  /** Cells whose centroid falls inside the rectangle (review.py _cells_in_rect). */
+  /** Cells whose centroid falls inside the rectangle. */
   inRect(rect: Rect): Cell[] {
     const [x0, y0, x1, y1] = rect;
     return this.query(rect)
@@ -102,7 +102,7 @@ export class CellStore {
       .filter((c) => c.centroid[0] >= x0 && c.centroid[0] <= x1 && c.centroid[1] >= y0 && c.centroid[1] <= y1);
   }
 
-  /** Cells whose centroid falls inside the lasso (review.py _cells_in_lasso). */
+  /** Cells whose centroid falls inside the lasso. */
   inLasso(points: Point[]): Cell[] {
     if (points.length < 3) return [];
     const bbox = bboxOf([points]);
@@ -112,7 +112,7 @@ export class CellStore {
   }
 }
 
-/** review.py _hit_test over an arbitrary set of entries (also used for rescan
+/** The hit test over an arbitrary set of entries (also used for rescan
  * proposals, which aren't in a store). */
 export function hitTest(entries: CellEntry[], x: number, y: number, scale: number): Cell | null {
   const pad = 2 / scale;

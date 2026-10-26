@@ -1,18 +1,17 @@
 """
-coexpression.py — CCK/CHR overlap, ported from the desktop client's
-client/coexpression.py with identical semantics:
+coexpression.py — CCK/CHR overlap:
 
 - only kept cells take part;
 - a CCK/CHR pair coexpresses when their rasterized overlap is at least
   `threshold` (default 50%) of the *smaller* cell's stored area;
 - the rate is pairs / kept SNAP cells.
 
-The desktop version bbox-tested every CCK cell against every CHR cell in pure
-Python, which is fine for a few hundred kept cells but quadratic. Here the
-candidate pairs come from one vectorized numpy bbox-intersection pass per CCK
-cell instead; the rasterized overlap test that decides each pair is unchanged
-(`skimage.draw.polygon2mask` on the pair's shared crop), so results match the
-desktop app cell for cell.
+Bbox-testing every CCK cell against every CHR cell in pure Python is fine for a
+few hundred kept cells but quadratic, so candidate pairs come from one
+vectorized numpy bbox-intersection pass per CCK cell; the rasterized overlap
+test that decides each pair (`skimage.draw.polygon2mask` on the pair's shared
+crop) is exact. projects/tests pins the results against reference output, cell
+for cell.
 """
 
 from __future__ import annotations
@@ -79,7 +78,7 @@ def compute_coexpression(cck_cells: list[dict], chr_cells: list[dict],
 
     for cck in cck_kept:
         bx0, by0, bx1, by1 = cck_bbox = bbox_of(cck["polygons"])
-        # Same inclusive test as the desktop _bbox_intersects, vectorized.
+        # Inclusive bbox intersection (touching boxes count), vectorized.
         hits = np.nonzero((bx0 <= chr_arr[:, 2]) & (chr_arr[:, 0] <= bx1)
                           & (by0 <= chr_arr[:, 3]) & (chr_arr[:, 1] <= by1))[0]
         for j in hits:

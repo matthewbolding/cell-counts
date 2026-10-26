@@ -1,4 +1,4 @@
-// undo.ts — per-image undo/redo, mirroring review.py's action classes: one
+// undo.ts — per-image undo/redo: one
 // action per user gesture (a drag-select batch or a rescan merge is ONE step),
 // unbounded depth, history kept per image so switching channels and back keeps
 // it. Every action also says what it means for the server: applying or

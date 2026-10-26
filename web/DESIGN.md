@@ -1,9 +1,7 @@
 # Cell Counts web app — design
 
-The web app replaces the desktop client (`client/`) and the single-user compute
-server (`server/`) with one site at **cellcounts.matthewbolding.com**. Researchers
-sign in from a browser; nothing is installed on their machines. Both old pieces
-keep running untouched until the web app reaches parity.
+Cell Counts is one site at **cellcounts.matthewbolding.com**. Researchers sign in
+from a browser; nothing is installed on their machines.
 
 ## Goals and constraints
 
@@ -19,8 +17,8 @@ keep running untouched until the web app reaches parity.
   (and those can't be turned off).
 - Projects are private to their owner, who can share one with another user as an
   editor or viewer.
-- The review screen keeps the desktop client's layout, controls, colors and
-  behavior.
+- The review screen works like a desktop application: menu bar, side panels,
+  status bar, keyboard shortcuts, and no page reloads.
 
 ## Deployment shape
 
@@ -98,12 +96,12 @@ browser ── HTTPS ── Cloudflare ── Tunnel ── cloudflared ─┐  
   `segmentation_params`.
 - `projects.Cell` is one row per detection: `(image, cell_id)` unique, plus
   `polygons`, `centroid`, `area`, `status`, `filter_reason`, `source`, `edited`,
-  `color`, `edited_by`, `edited_at`. The schema matches the desktop
-  `.cells.json` sidecars, so imports are lossless.
+  `color`, `edited_by`, `edited_at`. The schema matches the `.cells.json` review
+  files a folder may already contain, so imports are lossless.
 - `projects.ImageLock` is a 60-second edit lease, renewed while an editor has the
   image open.
-- `projects.ProjectUserState` holds per-user UI state (the desktop `state.json`
-  equivalent): last image, render mode, channel colors, zoom, selection/draw style.
+- `projects.ProjectUserState` holds per-user UI state: last image, render mode,
+  channel colors, zoom, selection/draw style.
 - `uploads.UploadSession` tracks one file in flight: chunk size, chunks received,
   sha256, and the image it replaces, if any.
 - `processing.Job` has `kind` (`prepare`, `segment`, `rescan`, `export`, `purge`),
@@ -129,7 +127,7 @@ The GPU worker picks the next job like this:
 
 The CPU worker runs `prepare` and `export` jobs oldest-first. `prepare` verifies
 the sha256, reads dimensions, builds tiles, then queues segmentation, unless
-cells were imported from a desktop folder.
+the image's cells were imported from its folder's review files.
 
 If a worker restarts, it re-queues whatever it was running once (`attempts`),
 then marks it as failed.
@@ -150,12 +148,12 @@ Security emails are not configurable.
 
 ## Upload flow (in the browser)
 
-This mirrors the desktop client's scan, then hash, then upload:
+Scan, then hash, then upload:
 
 1. **File → Add Images…** opens a folder picker (or accepts a dropped folder). The
    browser keeps `{PREFIX}_{CCK,CHR,SNAP}.tif` files and lists the rest as skipped.
 2. `uploads/plan` with `(name, size, lastModified)` tells the client which files
-   are unchanged by that check alone (the same fast path as the desktop client).
+   are unchanged by that check alone.
 3. The rest are hashed with SHA-256 in a Web Worker (hash-wasm, streaming), then
    `uploads/init` either says *skip* (same content already there), *conflict*
    (same name, different content — the user confirms a replace, which discards
@@ -169,10 +167,12 @@ This mirrors the desktop client's scan, then hash, then upload:
    much over 30 s at the measured speed (`laneTuner.ts`). Uploads resume after an
    interruption: re-adding the folder re-plans, and `init` reports the chunks
    already on the server.
-5. Desktop review work comes along. Each image is matched to the nearest
-   `cellcounts.json` at or above its folder (so a parent of several desktop
-   folders works). If the desktop app finished that exact file (status `done`
-   and the recorded sha256 matches), its `.cells.json` cells go up gzipped
+5. Review work already in the folder comes along. A reviewed folder holds a
+   `cellcounts.json` (each image's sha256, status and segmentation params) and a
+   `<file>.cells.json` per image. Each image is matched to the nearest
+   `cellcounts.json` at or above its folder (so a parent of several reviewed
+   folders works). If that entry is finished (status `done`) for this exact
+   file (the recorded sha256 matches), its `.cells.json` cells go up gzipped
    with `complete`, and the image skips segmentation. If the file is already on
    the server, the cells are imported into it instead (`import-cells`), unless
    someone has already reviewed it in the web app. Unreadable cells are
@@ -180,7 +180,7 @@ This mirrors the desktop client's scan, then hash, then upload:
 
 ## Review screen
 
-It's a single page per project that copies the desktop layout:
+It's a single page per project:
 
 - **Menu bar:** File (Open Project…, Add Images…, Export Data…, Share Project…),
   View (GPU Queue, Show Log), Process (Stop/Start Uploads, Stop/Start Segmenting),
@@ -194,11 +194,10 @@ It's a single page per project that copies the desktop layout:
 - **Bottom:** status message and connection light (Idle / Connecting… / Connected /
   Processing… / Error).
 
-The viewer is a hand-written canvas renderer in TypeScript. It ports the desktop
-`rendering.py`/`geometry.py` logic (viewport origin and scale, culling, the
-8 px level-of-detail dot cutoff, hit-testing) and draws image tiles underneath.
-It doesn't use a mapping library, so the look and interaction match the desktop
-app exactly.
+The viewer is a hand-written canvas renderer in TypeScript: viewport origin and
+scale, culling, an 8 px level-of-detail cutoff below which cells draw as dots,
+and hit-testing, with image tiles drawn underneath. It doesn't use a mapping
+library, so the look and interaction are entirely its own.
 
 Edits save as small batched operations a second after the last change. Undo/redo
 lives in the browser per image (Ctrl/⌘+Z, Ctrl/⌘+Shift+Z).
@@ -253,7 +252,7 @@ Cell ops (applied in order, all-or-nothing):
 | PUT | `/api/uploads/<uid>/chunks/<n>` | Raw bytes |
 | POST | `/api/uploads/<uid>/complete` | Optional JSON body (usually `Content-Encoding: gzip`) `{imported_cells: {cells, params}}` → `{image}` |
 | DELETE | `/api/uploads/<uid>` | Abort |
-| POST | `/api/images/<iid>/import-cells` | Desktop review data for an image already uploaded: `{sha256, imported_cells}`; replaces the server's cells only if nobody has edited the image in the web app (`web_edited_at`), otherwise 409 `has_edits`; identical data is a no-op |
+| POST | `/api/images/<iid>/import-cells` | A folder's `.cells.json` review data for an image already uploaded: `{sha256, imported_cells}`; replaces the server's cells only if nobody has edited the image in the web app (`web_edited_at`), otherwise 409 `has_edits`; identical data is a no-op |
 
 ### Queue, rescans, exports
 
@@ -292,5 +291,5 @@ web/
 2. Pipeline: uploads, storage, tiles, workers, scheduling, queue API/page, notifications.
 3. Workspace: layout, samples/queue panels, tiled viewer, channel tabs, composite.
 4. Editing: review/draw/delete, lasso/rectangle, undo/redo, autosave, edit locks.
-5. Rescan, export, desktop import, sharing.
+5. Rescan, export, review-file import, sharing.
 6. Deployment: images, compose, tunnel, NFS, backups, runbook.

@@ -1,14 +1,14 @@
 """
-segmentation.py — Cellpose-SAM segmentation, ported from server/segment.py.
+segmentation.py — Cellpose-SAM segmentation.
 
-The algorithm is unchanged: Cellpose, then the brightness filter (drop
-detections with no real signal), then the locality filter (drop spatially
-isolated detections), then vector outlines. Filtered detections are kept as
-`status: "filtered"` with a reason, exactly as the desktop app expects.
+Cellpose, then the brightness filter (drop detections with no real signal),
+then the locality filter (drop spatially isolated detections), then vector
+outlines. Filtered detections are kept as `status: "filtered"` with a reason,
+so a reviewer can still mark one as a cell.
 
-What changed from the server version: `run()` takes an array instead of a path
-(rescan passes a crop), and there's a `FakeModel` so the whole pipeline runs on
-a laptop or in tests without torch or a GPU (CELLCOUNTS_FAKE_MODEL=1).
+`run()` takes an array (rescan passes a crop), and `FakeModel` lets the whole
+pipeline run on a laptop or in tests without torch or a GPU
+(CELLCOUNTS_FAKE_MODEL=1).
 """
 
 from __future__ import annotations
@@ -214,9 +214,9 @@ def load_model(cpu: bool = False, fp32: bool = False):
 
 
 def release_gpu_memory() -> None:
-    """Hand PyTorch's cached-but-unused memory back to the driver after each job
-    (see server/jobs.py for why: image sizes vary ~40x, so the cache otherwise
-    holds the session's peak forever)."""
+    """Hand PyTorch's cached-but-unused memory back to the driver after each job:
+    image sizes vary ~40x, so the cache otherwise holds the session's peak
+    forever."""
     try:
         import torch
     except ImportError:

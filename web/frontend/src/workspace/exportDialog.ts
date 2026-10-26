@@ -1,4 +1,4 @@
-// exportDialog.ts — File › Export Data… (review.py's _ExportDialog): pick samples
+// exportDialog.ts — File › Export Data…: pick samples
 // (each with its readiness dots, so it's clear what has data), Select All /
 // None, and which sheets; then the server builds the workbook in the background
 // and the browser downloads it when it's ready.

@@ -1,15 +1,15 @@
 """
 services.py — the upload protocol's logic, kept out of the HTTP layer.
 
-The flow mirrors the desktop client: `plan` is the cheap stat check (filename +
-size + lastModified, the same fast path client/manifest.py's cached_hash used),
-`init` happens once the browser has hashed a file, chunks are written in place
+`plan` is the cheap stat check (filename + size + lastModified: a file that
+matches what's on the server isn't hashed again), `init` happens once the
+browser has hashed a file, chunks are written in place
 at their offsets, and `complete` turns a fully received file into an Image and
 hands it to the CPU worker.
 
 Quota is always charged to the *project owner*, whoever uploads: a collaborator
-adding images to a shared project fills the owner's space, the same way the
-desktop data lived in the owner's folder. Open upload sessions count as
+adding images to a shared project fills the owner's space. Open upload sessions
+count as
 reserved space (User.storage_used_bytes), and the check runs with the owner's
 row locked so two uploads racing can't both squeeze under the limit.
 """
@@ -40,14 +40,14 @@ from uploads.models import UploadSession
 
 log = logging.getLogger(__name__)
 
-# {PREFIX}_{CCK,CHR,SNAP}.tif — same rule as client/manifest.py's FILENAME_RE.
+# {PREFIX}_{CCK,CHR,SNAP}.tif, PREFIX = letters (animal) + digits (sample).
 FILENAME_RE = re.compile(r"^([A-Za-z]+\d+)_(CCK|CHR|SNAP)\.tif$", re.IGNORECASE)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 MAX_FILE_BYTES = 8 * 1024**3          # the real corpus tops out under 300 MB per file
 MAX_PLAN_FILES = 20_000
 READ_BLOCK = 1024 * 1024
-MAX_IMPORT_COMPRESSED = 64 * 1024**2  # a desktop sidecar for the densest image is ~17 MB uncompressed
+MAX_IMPORT_COMPRESSED = 64 * 1024**2  # a .cells.json for the densest image is ~17 MB uncompressed
 MAX_IMPORT_BYTES = 512 * 1024**2
 STALE_UPLOAD_AGE = timedelta(days=7)
 
@@ -118,7 +118,7 @@ def plan(project: Project, files: list) -> dict:
             "channel": parsed.channel,
             "decision": "unchanged" if unchanged else "needs_hash",
             "image_id": str(img.id) if img else None,
-            # Lets the browser match desktop review data to a file it skipped
+            # Lets the browser match a folder's review data to a file it skipped
             # hashing (cellcounts.json records each file's sha256).
             "sha256": img.sha256 if img else None,
         })
@@ -240,7 +240,7 @@ def write_chunk(session: UploadSession, index: int, stream, content_length: int 
 # complete
 # --------------------------------------------------------------------------- #
 def read_import_body(stream, content_encoding: str) -> dict | None:
-    """The optional body of `complete`: a (usually gzipped) desktop sidecar.
+    """The optional body of `complete`: a (usually gzipped) `.cells.json`.
     Both the compressed and decompressed sizes are capped, so a crafted body
     can't balloon in memory."""
     raw = stream.read(MAX_IMPORT_COMPRESSED + 1)
@@ -285,7 +285,7 @@ def _usable_rings(polygons) -> list:
 
 
 def imported_cell_rows(payload) -> ImportedCells:
-    """Rows for a desktop `.cells.json` (the desktop sidecar schema, unchanged).
+    """Rows for a `.cells.json` review file (its schema, unchanged).
 
     Lenient on purpose: this is someone's finished review work, so one
     unreadable cell (a degenerate ring, a bad field) is dropped and counted
@@ -318,7 +318,7 @@ def imported_cell_rows(payload) -> ImportedCells:
 
 
 def complete(session: UploadSession, user, import_data: dict | None) -> tuple[Image, dict | None]:
-    """Returns the image, plus a summary of any imported desktop cells."""
+    """Returns the image, plus a summary of any imported review cells."""
     missing = session.missing_chunks()
     if missing:
         raise ApiError(409, "missing_chunks", f"{len(missing)} chunk(s) haven't arrived yet.",
@@ -344,7 +344,7 @@ def complete(session: UploadSession, user, import_data: dict | None) -> tuple[Im
         purge_dirs: list[list[str]] = []
         # Re-uploading the same content (its original went missing) keeps the
         # cells already reviewed on the server; they're newer than anything a
-        # desktop sidecar could bring.
+        # .cells.json could bring.
         keep_cells = image is not None and image.sha256 == session.sha256 and image.cells.exists()
         if keep_cells:
             imported_rows = None
@@ -380,7 +380,7 @@ def complete(session: UploadSession, user, import_data: dict | None) -> tuple[Im
                 image.cells_version += 1
             image.save()
             if imported_rows:
-                # Desktop edits carry no record of who made them, so edited_by stays empty.
+                # Review files carry no record of who made the edits, so edited_by stays empty.
                 Cell.objects.bulk_create([Cell(image=image, **r) for r in imported_rows], batch_size=2000)
             session.completed_at = timezone.now()
             session.save(update_fields=["completed_at", "updated_at"])
@@ -414,13 +414,13 @@ def sweep_stale_uploads(now=None) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Desktop review data for an image that's already on the server
+# A folder's review data for an image that's already on the server
 # --------------------------------------------------------------------------- #
 def import_into_existing(image: Image, user, data: dict) -> dict:
-    """Bring desktop review data into an image that was uploaded without it
+    """Bring a folder's review data into an image that was uploaded without it
     (the TIFFs went up first, the folder's .cells.json files later).
 
-    Desktop work only ever replaces the server's cells while nobody has edited
+    It only ever replaces the server's cells while nobody has edited
     the image in the web app; once someone has, the web version is kept and the
     caller is told so (409 `has_edits`). Re-importing data identical to what's
     already there is a quiet no-op, so adding the same folder twice is harmless.
@@ -428,14 +428,14 @@ def import_into_existing(image: Image, user, data: dict) -> dict:
     sha256 = str(data.get("sha256", "")).lower().removeprefix("sha256:")
     if sha256 != image.sha256:
         raise ApiError(409, "content_mismatch",
-                       f"The desktop review data for {image.filename} is for a different version of the file.")
+                       f"The review data for {image.filename} is for a different version of the file.")
     imported = imported_cell_rows(data.get("imported_cells"))
 
     with transaction.atomic():
         image = Image.objects.select_for_update().get(pk=image.pk)
         if image.status in (ImageStatus.PREPARING, ImageStatus.SEGMENTING):
             raise ApiError(409, "busy", f"{image.filename} is still being processed on the server. Add the folder "
-                           "again once it has finished to bring in the desktop review work.")
+                           "again once it has finished to bring in its review work.")
         if not image.tiles_rev:
             raise ApiError(409, "not_ready",
                            f"{image.filename} couldn't be prepared on the server; add the file again.")
@@ -449,9 +449,9 @@ def import_into_existing(image: Image, user, data: dict) -> dict:
             return {"result": "unchanged"}
         if image.web_edited_at is not None:
             raise ApiError(409, "has_edits", f"{image.filename} has already been reviewed in the web app, so that "
-                           "version was kept and the desktop review data wasn't imported.")
+                           "version was kept and the folder's review data wasn't imported.")
 
-        queue.cancel_jobs(Job.objects.filter(image=image), reason="Replaced by imported desktop review data")
+        queue.cancel_jobs(Job.objects.filter(image=image), reason="Replaced by imported review data")
         image.cells.all().delete()
         Cell.objects.bulk_create([Cell(image=image, **r) for r in imported.rows], batch_size=2000)
         image.cells_version += 1

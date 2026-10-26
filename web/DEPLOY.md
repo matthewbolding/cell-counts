@@ -103,18 +103,12 @@ Then sign in at https://cellcounts.matthewbolding.com. You'll be sent straight t
 code with an authenticator app and **save the recovery codes**. After that, **Manage Users…** in the account menu
 is where you approve access requests and invite people.
 
-### Sharing the GPU with what's already on the server
+### Sharing the GPU
 
-The old single-user server (`server-cellcounts-server-1`) keeps its own Cellpose model loaded on the same 12 GB
-GPU, and other GPU workloads on the server may too. Two Cellpose processes on one card can run out of memory on the largest
-images. While the researcher is still using the desktop app, either:
-
-- run the web app without segmentation for now: `docker compose up -d --scale gpu-worker=0`. Uploads, tiles,
-  review and export all work; images wait in the queue until a GPU worker runs. Or
-- leave both running and accept that a very large image may fail with "The GPU ran out of memory on this image."
-  **Retry** queues it again.
-
-Once everyone has moved over, retire the old server (section 6) and run the GPU worker full time.
+The GPU worker keeps Cellpose loaded on the server's 12 GB GPU. Other GPU workloads on the server use the same
+card, so the largest images can occasionally fail with "The GPU ran out of memory on this image."; **Retry**
+queues them again. To keep segmentation off the GPU for a while, **Pause GPU** on the GPU Queue page stops new
+segmentation for everyone without stopping uploads, review or export.
 
 ---
 
@@ -170,19 +164,7 @@ docker compose start web cpu-worker gpu-worker
 
 ---
 
-## 6. Retiring the old server
-
-When the researcher has moved over:
-
-1. On the server: `cd ~/cell-counts/server && docker compose down`.
-2. Remove the old server's reverse-proxy route and its DNS record in
-   Cloudflare.
-3. Desktop folders can be brought into the web app as they are. Adding a folder that has a `cellcounts.json`
-   uploads the images and keeps the review work stored next to them.
-
----
-
-## 7. Security checklist
+## 6. Security checklist
 
 - [ ] `docker compose ps` shows **no published ports**, and `sudo ss -tlnp` on the server shows nothing new
       listening.

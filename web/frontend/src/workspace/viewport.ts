@@ -1,4 +1,4 @@
-// viewport.ts — the screen <-> image mapping, the same model as review.py:
+// viewport.ts — the screen <-> image mapping:
 // `origin` is the image-space point at the canvas's top-left and `scale` is CSS
 // pixels per image pixel. Everything else (fit, zoom-about-a-point, pan) is
 // arithmetic on those two, which keeps hit-testing exact at any zoom.

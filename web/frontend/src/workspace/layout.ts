@@ -131,8 +131,7 @@ export function buildLayout(): Layout {
   };
 }
 
-/** Samples over Queue with a draggable divider (the desktop's PanedWindow,
- * weights 2:1). */
+/** Samples over Queue with a draggable divider (2:1 to start). */
 export function splitPanes(container: HTMLElement, top: HTMLElement, bottom: HTMLElement): void {
   const divider = el("div", { class: "ws-divider", attrs: { role: "separator", "aria-orientation": "horizontal" } });
   container.append(top, divider, bottom);

@@ -1,13 +1,13 @@
 """
-models.py — projects (the web equivalent of a desktop "folder"), who can see
-them, and their samples, images and cells.
+models.py — projects (one folder's worth of samples), who can see them, and
+their samples, images and cells.
 
-Cells are one row each rather than one JSON document per image (the desktop
-`.cells.json` sidecar). A review edit then touches only the rows it changes
-instead of rewriting a multi-megabyte document, exports and coexpression can
-filter `status='kept'` in SQL, and two collaborators editing different images
-never contend. The per-cell fields are exactly the desktop sidecar schema, so
-importing a desktop folder is lossless.
+Cells are one row each rather than one JSON document per image. A review edit
+then touches only the rows it changes instead of rewriting a multi-megabyte
+document, exports and coexpression can filter `status='kept'` in SQL, and two
+collaborators editing different images never contend. The per-cell fields are
+exactly the `.cells.json` review-file schema, so importing a reviewed folder
+is lossless.
 """
 
 from __future__ import annotations
@@ -116,7 +116,7 @@ class Image(models.Model):
     cells_version = models.PositiveIntegerField(default=0)
     segmentation_params = models.JSONField(null=True, blank=True)
     processed_at = models.DateTimeField(null=True, blank=True)
-    # Last review edit made in the web app. Desktop review data is only ever
+    # Last review edit made in the web app. A folder's review data is only ever
     # imported over an image that has none (uploads/services.py).
     web_edited_at = models.DateTimeField(null=True, blank=True)
     uploaded_by = models.ForeignKey(
@@ -171,7 +171,7 @@ class Cell(models.Model):
         return f"cell {self.cell_id} of {self.image}"
 
     def as_dict(self) -> dict:
-        """The desktop sidecar shape — what the frontend and exports consume."""
+        """The `.cells.json` shape — what the frontend and exports consume."""
         return {
             "id": self.cell_id,
             "polygons": self.polygons,
@@ -203,8 +203,7 @@ class ImageLock(models.Model):
 
 
 class ProjectUserState(models.Model):
-    """Per-user, per-project UI state — the web equivalent of the desktop
-    client's ~/.cellcounts/state.json, but it follows the user to any machine."""
+    """Per-user, per-project UI state; it follows the user to any machine."""
 
     project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="+")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="+")

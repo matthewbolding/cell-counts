@@ -1,9 +1,9 @@
 /*
- * app.css — the shared look for every server-rendered page, modelled on the
- * desktop client's Tk/ttk window: light gray chrome, compact controls, a menu bar
- * along the top, a status bar along the bottom, and the same palette for rows,
- * selection, readiness dots and the connection light (review.py / statusbar.py).
- * The workspace screen (frontend/src/workspace) builds on these tokens.
+ * app.css — the shared look for every server-rendered page, styled like a
+ * compact desktop application: light gray chrome, compact controls, a menu bar
+ * along the top, a status bar along the bottom, and one palette for rows,
+ * selection, readiness dots and the connection light. The workspace screen
+ * (frontend/src/workspace) builds on these tokens.
  */
 
 :root {
@@ -27,7 +27,7 @@
   --state-processing: #3498db;
   --state-error: #e74c3c;
 
-  /* review.py queue row colors */
+  /* Queue row colors */
   --queue-uploading: #fff2cc;
   --queue-segmenting: #b7e6b0;
   --queue-server-queued: #e2e6f5;
@@ -326,7 +326,7 @@ ul.errorlist { margin: 0; padding: 0; list-style: none; color: var(--danger); fo
 
 /* ------------------------------------------------------------------------ */
 /* Dialog layout (sign-in and other account entrance pages) — a centered     */
-/* window like the desktop LoginDialog                                       */
+/* window                                                                   */
 /* ------------------------------------------------------------------------ */
 .dialog-page {
   display: flex;

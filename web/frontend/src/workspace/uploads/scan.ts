@@ -1,16 +1,15 @@
-// scan.ts — turn a picked or dropped folder into the files worth uploading, the
-// same way the desktop client's scan_folder() did: every {PREFIX}_{CCK,CHR,SNAP}.tif
-// anywhere under the folder is recognized (PREFIX upper-cased), any other .tif is
-// reported as skipped rather than silently ignored, and everything else is
-// ignored.
+// scan.ts — turn a picked or dropped folder into the files worth uploading:
+// every {PREFIX}_{CCK,CHR,SNAP}.tif anywhere under the folder is recognized
+// (PREFIX upper-cased), any other .tif is reported as skipped rather than
+// silently ignored, and everything else is ignored.
 //
-// Desktop review work comes along too. The desktop app kept one cellcounts.json
-// (plus a <name>.cells.json per image) in the folder it opened, covering every
-// image under that folder. So each image is matched to the nearest
-// cellcounts.json at or above its own folder — which also handles picking a
-// parent folder that holds several desktop folders. Whether the review data
-// still applies (same file content, processing finished) is decided at upload
-// time by desktopMatch(), once the file's sha256 is known.
+// Review work already in the folder comes along too ("desktop" review files,
+// below). A reviewed folder holds one cellcounts.json, plus a <name>.cells.json
+// per image, covering every image under that folder. So each image is matched to
+// the nearest cellcounts.json at or above its own folder — which also handles
+// picking a parent folder that holds several reviewed folders. Whether the
+// review data still applies (same file content, processing finished) is decided
+// at upload time by desktopMatch(), once the file's sha256 is known.
 
 import type { Channel } from "../constants";
 
@@ -24,10 +23,10 @@ export interface DesktopEntry {
   params?: Record<string, unknown> | null;
 }
 
-/** One image's entry in a desktop cellcounts.json, and where its cells are. */
+/** One image's entry in a cellcounts.json, and where its cells are. */
 export interface DesktopRef {
   entry: DesktopEntry;
-  /** <name>.cells.json next to the cellcounts.json (desktop schema v2). */
+  /** <name>.cells.json next to the cellcounts.json (schema v2). */
   sidecar: File | null;
   /** Schema v1 cellcounts.json files embedded every image's cells. */
   embedded: unknown[] | null;
@@ -45,7 +44,7 @@ export interface ScanResult {
   recognized: Recognized[];
   skipped: string[];
   duplicates: string[];
-  /** How many desktop cellcounts.json files were found. */
+  /** How many cellcounts.json files were found. */
   desktopFolders: number;
 }
 
@@ -96,7 +95,7 @@ interface DesktopFolder {
   sidecars: Map<string, File>;
 }
 
-/** Every desktop cellcounts.json in the selection, by the folder it's in. */
+/** Every cellcounts.json in the selection, by the folder it's in. */
 async function readDesktopFolders(found: FoundFile[]): Promise<Map<string, DesktopFolder>> {
   const folders = new Map<string, DesktopFolder>();
   for (const f of found) {
@@ -105,7 +104,7 @@ async function readDesktopFolders(found: FoundFile[]): Promise<Map<string, Deskt
       const data = JSON.parse(await f.file.text());
       folders.set(dirOf(f.path), { images: data.images ?? {}, embedded: data.cells ?? {}, sidecars: new Map() });
     } catch {
-      // An unreadable cellcounts.json just means no desktop data for that folder.
+      // An unreadable cellcounts.json just means no review data for that folder.
     }
   }
   for (const f of found) {
@@ -124,8 +123,8 @@ function desktopRefFor(folders: Map<string, DesktopFolder>, path: string, name: 
   }
 }
 
-/** The desktop review data applies only if the desktop app finished this exact
- * file: same content (cellcounts.json records "sha256:<hex>") and status done. */
+/** The review data applies only if it was finished for this exact file: same
+ * content (cellcounts.json records "sha256:<hex>") and status done. */
 export function desktopMatch(ref: DesktopRef | null, sha256: string | null | undefined): DesktopRef | null {
   if (!ref || !sha256) return null;
   if (ref.entry.status !== "done" || ref.entry.hash !== `sha256:${sha256}`) return null;

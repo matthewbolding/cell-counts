@@ -1,11 +1,10 @@
-// workspace.ts — the review screen's controller: the web counterpart of
-// review.py's ReviewPanel plus the parts of app.py around it (menus, the
-// processing loop's status narration, Process › Stop/Start).
+// workspace.ts — the review screen's controller: the review area plus what's
+// around it (menus, uploads and processing status, Process › Stop/Start).
 //
 // State lives here; the pieces it drives are deliberately dumb: the Viewer
 // draws whatever Scene it's given, Interactions turns gestures into calls back
 // into this class, the panels render rows, CellSaver/EditLease talk to the
-// server. The rules review.py established carry over unchanged: pan/zoom is
+// server. The rules: pan/zoom is
 // kept across the tabs of one sample and reset to fit on a new one, Composite is
 // view-only, a rescan review takes over clicks until merged or discarded, and
 // every edit is one undoable step that saves itself a moment later.
@@ -520,7 +519,7 @@ export class Workspace implements InteractionHost {
   }
 
   // ------------------------------------------------------------------ //
-  // Polling (the desktop's job-status push, as a cheap poll)
+  // Polling (job status, as a cheap poll)
   // ------------------------------------------------------------------ //
   private schedulePoll(ms = document.hidden ? STATUS_POLL_HIDDEN_MS : STATUS_POLL_VISIBLE_MS): void {
     clearTimeout(this.pollTimer);
@@ -694,7 +693,7 @@ export class Workspace implements InteractionHost {
     if (image.status === "done") void this.loadCells(image, sameImage);
   }
 
-  /** review.py _apply_viewport: keep pan/zoom within a sample (its channels are
+  /** Keep pan/zoom within a sample (its channels are
    * the same field of view), fit × the remembered zoom on a new one. */
   private applyViewport(sameSample: boolean, image: ImageInfo): void {
     if (!image.width || !image.height) return;
@@ -924,8 +923,8 @@ export class Workspace implements InteractionHost {
     }
   }
 
-  /** Like the desktop app's Show Log / Show Review: the log (and now the GPU
-   * queue) replace the whole review area, toolbar included — in place, so an
+  /** View › Show Log / Show GPU Queue / Show Review: the log and the GPU
+   * queue replace the whole review area, toolbar included — in place, so an
    * upload in progress carries on. */
   private setView(view: View): void {
     if (view === this.view) return;
@@ -1061,7 +1060,7 @@ export class Workspace implements InteractionHost {
     }
     const params = await askRescanParams(clamped[2] - clamped[0], clamped[3] - clamped[1]);
     if (!params) return;
-    // Snap the mode back to Review while the sweep runs (review.py does the same).
+    // Snap the mode back to Review while the sweep runs.
     this.setMode("review");
     const runner = new SweepRunner();
     this.rescanRunner = runner;
@@ -1159,7 +1158,7 @@ export class Workspace implements InteractionHost {
   }
 
   /** Show "Reading folder…" straight away: walking a big dropped folder, and
-   * reading desktop review files, can take a while before anything uploads. */
+   * reading its review files, can take a while before anything uploads. */
   private async addFound(found: FoundFile[] | Promise<FoundFile[]>): Promise<void> {
     this.uploads.beginScan();
     const files = await found;
@@ -1212,7 +1211,7 @@ export class Workspace implements InteractionHost {
 // --------------------------------------------------------------------------- //
 // Helpers
 // --------------------------------------------------------------------------- //
-/** Desktop order: segmenting now, then preparing, then waiting for the GPU. */
+/** Segmenting now, then preparing, then waiting for the GPU. */
 function queueRank(row: QueueRow): number {
   if (row.kind === "segment" && row.status === "running") return -1;
   if (row.kind === "prepare") return 0;

@@ -1,5 +1,4 @@
-// interactions.ts — what a left-button press, drag and release mean in each mode,
-// ported from review.py's _on_canvas_press/_drag/_release:
+// interactions.ts — what a left-button press, drag and release mean in each mode:
 //
 //   Review   click toggles a cell; drag selects (lasso or rectangle) to mark many
 //   Draw     polygon: click vertices, double-click or Enter closes; freehand: drag
@@ -171,7 +170,7 @@ export class Interactions implements GestureHandler {
     this.host.requestRender();
   }
 
-  /** review.py's own double-click detection: the second click of a pair must
+  /** Our own double-click detection: the second click of a pair must
    * close the outline, not add a near-duplicate vertex first. */
   private polygonClick(p: PointerInfo): void {
     const now = performance.now();

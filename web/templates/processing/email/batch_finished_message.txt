@@ -2,7 +2,7 @@
 {% block content %}{% autoescape off %}Everything you queued in “{{ project.name }}” has finished.
 
 {% if n_segmented %}Segmented: {{ n_segmented }} image{{ n_segmented|pluralize }}
-{% endif %}{% if n_imported %}Imported from the desktop app: {{ n_imported }} image{{ n_imported|pluralize }}
+{% endif %}{% if n_imported %}Review work brought in from the folder: {{ n_imported }} image{{ n_imported|pluralize }}
 {% endif %}{% if n_failed %}Failed: {{ n_failed }} image{{ n_failed|pluralize }}
 {% for f in failures %}  - {{ f.filename }}: {{ f.message }}
 {% endfor %}{% if more_failures %}  …and {{ more_failures }} more.

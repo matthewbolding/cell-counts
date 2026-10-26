@@ -6,7 +6,7 @@ import { parseValues, RescanReview, type Combo } from "../rescan";
 import { desktopMatch, readDesktopCells, recognize, scanFiles } from "../uploads/scan";
 import type { Cell } from "../types";
 
-describe("queue moves (processing_queue.py semantics)", () => {
+describe("queue moves", () => {
   const order = ["a", "b", "c", "d", "e"];
   const sel = (keys: string) => (k: string) => keys.includes(k);
 
@@ -40,13 +40,13 @@ describe("breathing rows", () => {
   });
 });
 
-describe("folder scanning (client/manifest.py scan_folder rules)", () => {
+describe("folder scanning", () => {
   it("recognizes channel files and upper-cases the prefix", () => {
     expect(recognize("aa12_cck.TIF")).toEqual({ prefix: "AA12", channel: "CCK" });
     expect(recognize("A1_CCL.tif")).toBeNull();
   });
 
-  it("skips misnamed tifs, ignores other files, and reads desktop data", async () => {
+  it("skips misnamed tifs, ignores other files, and reads review files", async () => {
     const f = (name: string, body = "x") => ({ file: new File([body], name), path: `Folder/${name}` });
     const manifest = JSON.stringify({ images: { "A1_SNAP.tif": { hash: "sha256:abc", status: "done" } } });
     const scan = await scanFiles([
@@ -62,8 +62,8 @@ describe("folder scanning (client/manifest.py scan_folder rules)", () => {
     expect(scan.recognized.find((r) => r.name === "a1_cck.tif")!.desktop).toBeNull(); // not in cellcounts.json
   });
 
-  it("matches each image to the nearest desktop cellcounts.json above it", async () => {
-    // A parent folder holding two desktop folders, one with an image in a subfolder.
+  it("matches each image to the nearest cellcounts.json above it", async () => {
+    // A parent folder holding two reviewed folders, one with an image in a subfolder.
     const manifest = (names: string[]) => JSON.stringify({ images: Object.fromEntries(
       names.map((n) => [n, { hash: `sha256:${n}`, status: "done", params: { diameter: 0 } }])) });
     const f = (path: string, body = "x") => ({ file: new File([body], path.split("/").pop()!), path });
@@ -81,10 +81,10 @@ describe("folder scanning (client/manifest.py scan_folder rules)", () => {
     expect((await readDesktopCells(b1.desktop!))?.cells).toHaveLength(2);
   });
 
-  it("uses desktop review data only for finished files with the same content", () => {
+  it("uses review data only for finished files with the same content", () => {
     const ref = { entry: { hash: "sha256:abc", status: "done" }, sidecar: new File(["{}"], "x"), embedded: null };
     expect(desktopMatch(ref, "abc")).toBe(ref);
-    expect(desktopMatch(ref, "def")).toBeNull(); // the file changed since the desktop app saw it
+    expect(desktopMatch(ref, "def")).toBeNull(); // the file changed since it was reviewed
     expect(desktopMatch({ ...ref, entry: { hash: "sha256:abc", status: "processing" } }, "abc")).toBeNull();
     expect(desktopMatch({ ...ref, sidecar: null }, "abc")).toBeNull(); // nothing to import
     expect(desktopMatch(ref, undefined)).toBeNull();

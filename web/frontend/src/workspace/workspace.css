@@ -1,8 +1,7 @@
 /*
  * workspace.css — the review screen. Builds on static/css/app.css's tokens and
- * chrome (menubar, statusbar, buttons) and lays the window out like the
- * desktop ReviewPanel: toolbar row, then a 210 px left column, the canvas, and a
- * 200 px right column.
+ * chrome (menubar, statusbar, buttons) and lays the window out: toolbar row,
+ * then a 210 px left column, the canvas, and a 200 px right column.
  */
 
 body.workspace-page { overflow: hidden; }
@@ -230,7 +229,7 @@ body.workspace-page { overflow: hidden; }
 .ws-log-lines div { white-space: pre-wrap; }
 
 /* ------------------------------------------------------------------ */
-/* Dialogs (Toplevel look)                                            */
+/* Dialogs                                                            */
 /* ------------------------------------------------------------------ */
 dialog.ws-dialog {
   width: min(420px, calc(100vw - 32px));

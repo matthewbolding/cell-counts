@@ -5,8 +5,7 @@
 // permanent loop). What gets drawn on top of the tiles is the current Scene's
 // business — a channel's cells, the composite overlay, rescan proposals — and
 // left-button gestures go to a GestureHandler (interactions.ts). The viewer
-// itself only handles navigation, the same bindings as review.py adapted to
-// trackpads: wheel/two-finger scroll pans, Shift+wheel pans sideways,
+// itself only handles navigation, with bindings that suit mice and trackpads: wheel/two-finger scroll pans, Shift+wheel pans sideways,
 // Ctrl/⌘+wheel and pinch zoom toward the pointer, middle-drag pans, and holding
 // the right button hides every overlay to show the plain image.
 
