@@ -1,0 +1,1 @@
+{% if n_failed == 1 %}An image failed to process{% else %}{{ n_failed }} images failed to process{% endif %} in {{ project.name }}

@@ -1,0 +1,6 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}Your Cell Counts account has been approved. Sign in here:
+
+{{ login_url }}
+
+The first time you sign in, you'll be asked to set up two-factor authentication with an authenticator app (for example Google Authenticator, Microsoft Authenticator, 1Password, or Authy).{% endautoescape %}{% endblock content %}

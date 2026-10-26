@@ -10,6 +10,13 @@ split into a client and a server:
   every file, skips anything already processed, and sends the rest to the server.
   See **[CLIENT.md](CLIENT.md)** for install/run.
 
+## Web app
+
+`web/` is the browser version that replaces both of the above: researchers sign in at a website instead of
+installing anything, the GPU server is never exposed to the internet, and several people can share the GPU and
+collaborate on projects. See **[web/README.md](web/README.md)**, [web/DESIGN.md](web/DESIGN.md) and
+[web/DEPLOY.md](web/DEPLOY.md). The desktop client and compute server keep working until it replaces them.
+
 ## How it fits together
 
 Each sample is three channel images following `{PREFIX}_{CCK,CHR,SNAP}.tif`, where

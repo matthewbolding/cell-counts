@@ -1,0 +1,14 @@
+# Local development services only (the app itself runs with `uv run manage.py runserver`).
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: cellcounts
+      POSTGRES_USER: cellcounts
+      POSTGRES_PASSWORD: cellcounts
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - pgdata-dev:/var/lib/postgresql/data
+volumes:
+  pgdata-dev:

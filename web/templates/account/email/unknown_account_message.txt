@@ -1,0 +1,4 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}Someone asked to reset a Cell Counts password for {{ email }}, but there's no account with that address.
+
+If that was you, you may have signed up with a different address. Otherwise, ignore this email.{% endautoescape %}{% endblock content %}

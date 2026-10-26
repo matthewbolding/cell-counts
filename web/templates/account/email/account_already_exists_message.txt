@@ -1,0 +1,6 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}Someone tried to request access to Cell Counts with this email address, but you already have an account.
+
+If that was you, sign in instead, or reset your password here: {{ password_reset_url }}
+
+Otherwise, you can ignore this email.{% endautoescape %}{% endblock content %}

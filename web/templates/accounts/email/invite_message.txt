@@ -1,0 +1,6 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}{{ invited_by.label }} has set up a Cell Counts account for you. To choose your password, open this link:
+
+{{ set_password_url }}
+
+The link works once and expires in 7 days. After you sign in, you'll be asked to set up two-factor authentication with an authenticator app (for example Google Authenticator, Microsoft Authenticator, 1Password, or Authy).{% endautoescape %}{% endblock content %}

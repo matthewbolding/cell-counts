@@ -1,0 +1,10 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}Here's what was processed for you since {{ since|date:"N j, P" }}:
+{% for p in projects %}
+{{ p.project.name }}
+{% if p.n_segmented %}  Segmented: {{ p.n_segmented }}
+{% endif %}{% if p.n_imported %}  Imported: {{ p.n_imported }}
+{% endif %}{% if p.n_failed %}  Failed: {{ p.n_failed }}
+{% endif %}  {{ p.url }}
+{% endfor %}
+You're getting this because "Daily summary" is turned on in your settings ({{ settings_url }}).{% endautoescape %}{% endblock content %}

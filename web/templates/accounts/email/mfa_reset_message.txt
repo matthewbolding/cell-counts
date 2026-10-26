@@ -1,0 +1,6 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}This is a security notice about your Cell Counts account.
+
+An administrator ({{ admin.label }}) removed the two-factor authentication from your account, and you've been signed out everywhere. The next time you sign in, you'll be asked to set up an authenticator app again.
+
+If you didn't ask for this, tell your administrator right away.{% endautoescape %}{% endblock content %}

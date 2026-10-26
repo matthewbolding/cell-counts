@@ -1,0 +1,9 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}{% if n_failed == 1 %}One of your images{% else %}{{ n_failed }} of your images{% endif %} in “{{ project.name }}” couldn't be processed:
+
+{% for f in failures %}- {{ f.filename }}: {{ f.message }}
+{% endfor %}{% if more_failures %}…and {{ more_failures }} more.
+{% endif %}
+Open the project to retry them: {{ project_url }}
+
+You're getting this because "Processing failures" is turned on in your settings ({{ settings_url }}).{% endautoescape %}{% endblock content %}

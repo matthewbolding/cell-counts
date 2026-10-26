@@ -1,0 +1,1 @@
+<img src="{{ attrs.src }}"{% if attrs.alt %} alt="{{ attrs.alt }}"{% endif %}{% if 'qr' in attrs.tags or 'totp' in attrs.tags %} class="qr"{% endif %}>

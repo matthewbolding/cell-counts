@@ -15,3 +15,17 @@ server/data/
 .env
 
 .DS_Store
+
+# Web app (web/). The *.html / *.json rules above are for the desktop tool's
+# reports and per-folder manifests; templates and frontend config must be kept.
+!web/templates/**/*.html
+!web/frontend/package.json
+!web/frontend/package-lock.json
+!web/frontend/tsconfig.json
+web/.venv/
+web/.data/
+web/staticfiles/
+web/static/dist/
+web/frontend/node_modules/
+web/deploy/.env
+web/deploy/tunnel.env

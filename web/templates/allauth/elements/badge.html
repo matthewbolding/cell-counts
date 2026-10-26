@@ -1,0 +1,1 @@
+{% load allauth %}<span class="badge{% if 'success' in attrs.tags or 'primary' in attrs.tags %} ok{% elif 'warning' in attrs.tags %} warn{% elif 'danger' in attrs.tags %} bad{% endif %}"{% if attrs.title %} title="{{ attrs.title }}"{% endif %}>{% slot %}{% endslot %}</span>

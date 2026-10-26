@@ -1,0 +1,18 @@
+{% extends "layouts/dialog.html" %}
+{% block title %}Confirm Email — Cell Counts{% endblock %}
+{% block titlebar %}Cell Counts — Confirm Email{% endblock %}
+{% block content %}
+{% if confirmation and can_confirm %}
+<p>Confirm that <strong>{{ confirmation.email_address.email }}</strong> is your email address.</p>
+<form method="post" action="{% url 'account_confirm_email' confirmation.key %}">
+  {% csrf_token %}
+  {{ redirect_field }}
+  <div class="buttons"><button type="submit" class="default">Confirm</button></div>
+</form>
+{% elif confirmation %}
+<p>This address is already confirmed on another account.</p>
+{% else %}
+<p>This confirmation link has expired or isn't valid. Sign in again to get a fresh one.</p>
+<div class="buttons"><a class="button default" href="{% url 'account_login' %}">Sign In</a></div>
+{% endif %}
+{% endblock %}

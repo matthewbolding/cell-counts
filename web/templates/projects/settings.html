@@ -1,0 +1,84 @@
+{% extends "layouts/app.html" %}
+{% block title %}{{ project.name }} settings — Cell Counts{% endblock %}
+{% block status %}{{ project.name }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'projects:workspace' project.id %}">← Back to {{ project.name }}</a></p>
+
+{% if is_owner %}
+<section class="panel">
+  <header><h2>Name</h2></header>
+  <div class="body">
+    <form method="post" action="{% url 'projects:rename' project.id %}" class="inline-form">
+      {% csrf_token %}
+      <label for="project-name">Name:</label>
+      <input id="project-name" type="text" name="name" value="{{ project.name }}" maxlength="120" required>
+      <button type="submit">Rename</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+
+<section class="panel">
+  <header><h2>Sharing</h2></header>
+  <div class="body">
+    <p class="muted">Editors can upload images, review and edit cells, rescan and export. Viewers can look and
+    export. Only you can share, rename or delete the project, and its storage counts against your quota.</p>
+  </div>
+  <table class="list">
+    <thead><tr><th>Person</th><th>Access</th><th></th></tr></thead>
+    <tbody>
+      <tr><td>{{ project.owner.label }}{% if project.owner == user %} (you){% endif %}</td><td>Owner</td><td></td></tr>
+      {% for m in members %}
+      <tr>
+        <td>{{ m.user.label }}{% if m.user == user %} (you){% endif %}</td>
+        <td>{{ m.get_role_display }}</td>
+        <td class="actions">
+          {% if is_owner or m.user == user %}
+          <form method="post" action="{% url 'projects:unshare' project.id m.id %}">
+            {% csrf_token %}
+            <button type="submit" data-confirm="{% if m.user == user %}Leave this project?{% else %}Remove {{ m.user.label }}'s access?{% endif %}">{% if m.user == user %}Leave{% else %}Remove{% endif %}</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if is_owner %}
+  <div class="body">
+    {% if candidates %}
+    <form method="post" action="{% url 'projects:share' project.id %}" class="inline-form">
+      {% csrf_token %}
+      <label for="share-user">Share with:</label>
+      <select id="share-user" name="user_id" required>
+        {% for c in candidates %}<option value="{{ c.pk }}">{{ c.label }}</option>{% endfor %}
+      </select>
+      <select name="role" aria-label="Access">
+        <option value="editor">Editor</option>
+        <option value="viewer">Viewer</option>
+      </select>
+      <button type="submit">Share</button>
+    </form>
+    {% else %}
+    <p class="muted">There's no one else to share with yet.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+
+{% if is_owner %}
+<section class="panel">
+  <header><h2>Delete project</h2></header>
+  <div class="body">
+    <p>Deletes every image, tile and review edit in this project from the server, for everyone it's shared
+    with. This can't be undone. Your original files on your own computer aren't affected.</p>
+    <form method="post" action="{% url 'projects:delete' project.id %}" class="inline-form">
+      {% csrf_token %}
+      <label for="confirm-name">Type <strong>{{ project.name }}</strong> to confirm:</label>
+      <input id="confirm-name" type="text" name="confirm_name" autocomplete="off" required>
+      <button type="submit" class="danger">Delete Project</button>
+    </form>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

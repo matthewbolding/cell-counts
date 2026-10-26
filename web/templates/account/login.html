@@ -1,0 +1,17 @@
+{% extends "layouts/dialog.html" %}
+{% block title %}Sign In — Cell Counts{% endblock %}
+{% block titlebar %}Cell Counts — Sign In{% endblock %}
+{% block content %}
+<form method="post" action="{% url 'account_login' %}">
+  {% csrf_token %}
+  {{ redirect_field }}
+  <div class="form-grid">
+    {% include "account/snippets/form_fields.html" with form=form %}
+  </div>
+  <div class="buttons"><button type="submit" class="default">Sign In</button></div>
+</form>
+<div class="footer-links">
+  <a href="{% url 'account_reset_password' %}">Forgot your password?</a>
+  <a href="{% url 'account_signup' %}">Request access</a>
+</div>
+{% endblock %}

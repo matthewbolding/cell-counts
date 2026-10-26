@@ -1,0 +1,49 @@
+[project]
+name = "cellcounts-web"
+version = "0.1.0"
+description = "Cell Counts web app: multi-user cell segmentation review"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "django>=6.0",
+    "django-allauth[mfa]>=65.0",
+    "django-anymail[resend]>=13.0",
+    "argon2-cffi>=23.1",
+    "psycopg[binary]>=3.2",
+    "gunicorn>=23.0",
+    "numpy>=2.1",
+    "scipy>=1.14",
+    "scikit-image>=0.25",
+    "tifffile>=2024.9",
+    "pillow>=11.0",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+gpu = ["cellpose>=4.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-django>=4.9",
+    "ruff>=0.8",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "cellcounts.settings_test"
+python_files = ["tests.py", "test_*.py"]
+addopts = "-q"
+filterwarnings = [
+    # scikit-image vs NumPy 2.5, inside skimage itself
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+extend-exclude = ["*/migrations/*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "DJ"]

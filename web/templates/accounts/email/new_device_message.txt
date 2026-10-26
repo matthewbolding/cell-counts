@@ -1,0 +1,10 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}This is a security notice about your Cell Counts account. It was just signed in to from a device or network it hasn't used before:
+
+Browser: {{ device.user_agent }}
+Network: {{ device.network }}
+When: {{ when|date:"N j, Y, P T" }}
+
+If this was you, there's nothing to do.
+
+If it wasn't, reset your password now ({{ reset_url }}) and tell your administrator.{% endautoescape %}{% endblock content %}

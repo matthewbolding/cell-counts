@@ -1,0 +1,233 @@
+# Cell Counts production stack for the GPU server. See DEPLOY.md.
+#
+#   cd web/deploy && docker compose up -d --build
+#
+# No service publishes a port on the host. The only way in is the Cloudflare
+# Tunnel: cloudflared dials out to Cloudflare and forwards to nginx:80.
+#
+# Networks:
+#   edge     cloudflared <-> nginx (internet egress for cloudflared)
+#   app      nginx <-> web; also gives web and cpu-worker outbound internet for
+#            Resend (email) and Turnstile verification
+#   backend  web, workers, db, backup — internal: no internet at all
+#
+# The NAS is mounted on the host (DEPLOY.md, "NAS mount") at ${NAS_MOUNT} and
+# bind-mounted at /data wherever files are read or written. Postgres is on a
+# local named volume, never the NAS.
+
+name: cellcounts
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-app-env: &app-env
+  CELLCOUNTS_ENV: production
+  CELLCOUNTS_DATA_ROOT: /data
+  POSTGRES_HOST: db
+  POSTGRES_PORT: "5432"
+
+x-app: &app
+  image: cellcounts-web:${IMAGE_TAG:-current}
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+    args:
+      APP_UID: ${APP_UID:-1000}
+      APP_GID: ${APP_GID:-1000}
+  env_file: .env
+  environment: *app-env
+  volumes:
+    - ${NAS_MOUNT:-/mnt/cellcounts}:/data
+  read_only: true
+  tmpfs:
+    - /tmp:size=1g
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+  restart: unless-stopped
+  logging: *logging
+
+services:
+  db:
+    image: postgres:17.11-trixie
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: ${TZ:-America/Chicago}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    shm_size: 256mb
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    deploy:
+      resources:
+        limits: {cpus: "4", memory: 4g}
+    restart: unless-stopped
+    logging: *logging
+
+  # One-shot release step: migrations, cache table, static files -> volume.
+  migrate:
+    <<: *app
+    command: ["/app/deploy/release.sh"]
+    volumes:
+      - ${NAS_MOUNT:-/mnt/cellcounts}:/data
+      - static:/srv/static
+    networks: [backend]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
+
+  web:
+    <<: *app
+    networks: [app, backend]
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "/app/deploy/healthcheck.py"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+    deploy:
+      resources:
+        limits: {cpus: "8", memory: 8g}
+
+  cpu-worker:
+    <<: *app
+    command: ["python", "manage.py", "run_worker", "--resource", "cpu"]
+    networks: [app, backend]
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    # Let a running tile/export job finish on `docker compose stop`.
+    stop_grace_period: 5m
+    deploy:
+      resources:
+        # Tiling the largest images (13246 x 10961 uint16) peaks at a few GB.
+        limits: {cpus: "8", memory: 16g}
+
+  gpu-worker:
+    <<: *app
+    image: cellcounts-gpu:${IMAGE_TAG:-current}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gpu
+      args:
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
+    command: ["python", "manage.py", "run_worker", "--resource", "gpu"]
+    environment:
+      <<: *app-env
+      # Read-only root filesystem: torch/triton caches go to the tmpfs.
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp/cache
+      TRITON_CACHE_DIR: /tmp/triton
+      MPLCONFIGDIR: /tmp/matplotlib
+    tmpfs:
+      - /tmp:size=4g
+    # Only the internal network: database and NAS, no internet, nothing can
+    # reach it. Model weights are baked into the image.
+    networks: [backend]
+    depends_on:
+      db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+    # A large image can take minutes to segment; give it time to finish.
+    # (Anything cut off is re-queued once when the worker starts again.)
+    stop_grace_period: 10m
+    deploy:
+      resources:
+        limits: {cpus: "8", memory: 24g}
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  nginx:
+    image: nginx:1.30.6-alpine
+    volumes:
+      - ./nginx/cellcounts.conf:/etc/nginx/conf.d/default.conf:ro
+      - static:/srv/static:ro
+      - ${NAS_MOUNT:-/mnt/cellcounts}:/data:ro
+    networks: [edge, app]
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    depends_on:
+      web: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8081/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits: {cpus: "2", memory: 512m}
+    restart: unless-stopped
+    logging: *logging
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.3
+    command: ["tunnel", "--no-autoupdate", "run"]
+    # The tunnel token lives in its own file so it never reaches the app
+    # containers (they all load .env).
+    env_file: tunnel.env
+    networks: [edge]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    depends_on:
+      nginx: {condition: service_started}
+    deploy:
+      resources:
+        limits: {cpus: "1", memory: 256m}
+    restart: unless-stopped
+    logging: *logging
+
+  backup:
+    image: postgres:17.11-trixie
+    entrypoint: ["/bin/sh", "/backup.sh"]
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      TZ: ${TZ:-America/Chicago}
+    volumes:
+      - ./backup.sh:/backup.sh:ro
+      - ${NAS_MOUNT:-/mnt/cellcounts}:/data
+    networks: [backend]
+    read_only: true
+    depends_on:
+      db: {condition: service_healthy}
+    restart: unless-stopped
+    logging: *logging
+
+networks:
+  edge:
+    ipam:
+      config:
+        # nginx trusts CF-Connecting-IP only from this subnet (set_real_ip_from
+        # in nginx/cellcounts.conf) — change both together.
+        - subnet: 172.29.0.0/24
+  app: {}
+  backend:
+    internal: true
+
+volumes:
+  pgdata: {}
+  static: {}

@@ -1,0 +1,10 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}This is a security notice about your Cell Counts account:
+
+{% block notification_message %}{% endblock notification_message %}
+
+When: {{ timestamp }}
+Browser: {{ user_agent }}
+IP address: {{ ip }}
+
+If this wasn't you, reset your password right away and tell your administrator.{% endautoescape %}{% endblock content %}

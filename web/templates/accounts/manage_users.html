@@ -1,0 +1,89 @@
+{% extends "layouts/app.html" %}
+{% load humanize %}
+{% block title %}Manage Users — Cell Counts{% endblock %}
+{% block status %}Manage users{% endblock %}
+{% block content_class %}{% endblock %}
+{% block content %}
+<section class="panel">
+  <header><h2>Waiting for approval</h2></header>
+  <table class="list">
+    <thead><tr><th>Email</th><th>Name</th><th>Requested</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for r in pending_rows %}
+      <tr>
+        <td>{{ r.user.email }}</td>
+        <td>{{ r.user.display_name|default:"—" }}</td>
+        <td>{{ r.user.date_joined|naturaltime }}</td>
+        <td>{% if r.state == "pending_verification" %}<span class="badge warn">Email not confirmed</span>{% else %}<span class="badge">Email confirmed</span>{% endif %}</td>
+        <td class="actions">
+          <form method="post" action="{% url 'accounts:manage_user_action' r.user.pk 'approve' %}">{% csrf_token %}<button type="submit" class="default"{% if r.state == "pending_verification" %} disabled title="They need to confirm their email first"{% endif %}>Approve</button></form>
+          <form method="post" action="{% url 'accounts:manage_user_action' r.user.pk 'reject' %}">{% csrf_token %}<button type="submit" data-confirm="Remove the request from {{ r.user.email }}?">Reject</button></form>
+        </td>
+      </tr>
+    {% empty %}
+      <tr class="empty"><td colspan="5">No one is waiting.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <header><h2>Accounts</h2></header>
+  <table class="list">
+    <thead><tr><th>Email</th><th>Name</th><th>Status</th><th>2FA</th><th class="num">Storage</th><th class="hide-narrow">Last sign-in</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.user.email }}{% if r.user.is_staff %} <span class="badge">Admin</span>{% endif %}</td>
+        <td>{{ r.user.display_name|default:"—" }}</td>
+        <td>
+          {% if r.state == "disabled" %}<span class="badge bad">Disabled</span>
+          {% elif r.pending_invite %}<span class="badge warn">Invited</span>
+          {% else %}<span class="badge ok">Active</span>{% endif %}
+        </td>
+        <td>{% if r.has_mfa %}<span class="badge ok">On</span>{% else %}<span class="badge warn">Not set up</span>{% endif %}</td>
+        <td class="num">
+          <form method="post" action="{% url 'accounts:manage_user_action' r.user.pk 'quota' %}" class="inline-form">
+            {% csrf_token %}
+            {{ r.used|filesizeformat }} of
+            <input type="number" name="quota_gb" min="1" value="{% widthratio r.user.storage_quota_bytes 1073741824 1 %}" class="quota-input" aria-label="Quota in GB"> GB
+            <button type="submit">Set</button>
+          </form>
+        </td>
+        <td class="hide-narrow">{{ r.user.last_login|naturaltime|default:"Never" }}</td>
+        <td class="actions">
+          {% if r.pending_invite %}
+          <form method="post" action="{% url 'accounts:manage_user_action' r.user.pk 'resend_invite' %}">{% csrf_token %}<button type="submit">Resend Invite</button></form>
+          {% endif %}
+          {% if r.user != user %}
+            {% if r.has_mfa %}
+            <form method="post" action="{% url 'accounts:manage_user_action' r.user.pk 'reset_mfa' %}">{% csrf_token %}<button type="submit" data-confirm="Remove {{ r.user.email }}'s two-factor authentication and sign them out everywhere? They'll set it up again at next sign-in.">Reset 2FA</button></form>
+            {% endif %}
+            {% if r.state == "disabled" %}
+            <form method="post" action="{% url 'accounts:manage_user_action' r.user.pk 'enable' %}">{% csrf_token %}<button type="submit">Enable</button></form>
+            {% else %}
+            <form method="post" action="{% url 'accounts:manage_user_action' r.user.pk 'disable' %}">{% csrf_token %}<button type="submit" class="danger" data-confirm="Disable {{ r.user.email }}? They'll be signed out everywhere and can't sign in until re-enabled.">Disable</button></form>
+            {% endif %}
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel" id="invite">
+  <header><h2>Invite someone</h2></header>
+  <div class="body">
+    <p class="muted">Creates an approved account and emails a link to choose a password. They'll set up
+    two-factor authentication the first time they sign in.</p>
+    <form method="post" action="{% url 'accounts:manage_invite' %}">
+      {% csrf_token %}
+      <div class="form-grid narrow-form">
+        {% include "account/snippets/form_fields.html" with form=invite_form %}
+      </div>
+      <div class="buttons left"><button type="submit" class="default">Send Invitation</button></div>
+    </form>
+  </div>
+</section>
+{% endblock %}

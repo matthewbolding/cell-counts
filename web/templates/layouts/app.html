@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="app">
+  <nav class="menubar" aria-label="Main menu">
+    <span class="app-name">Cell Counts</span>
+    {% block menus %}
+    <details class="menu">
+      <summary>File</summary>
+      <div class="menu-items">
+        <a href="{% url 'projects:list' %}">Open Project…</a>
+        <a href="{% url 'projects:list' %}#new-project">New Project…</a>
+      </div>
+    </details>
+    <details class="menu">
+      <summary>View</summary>
+      <div class="menu-items">
+        <a href="{% url 'projects:list' %}">Projects</a>
+        <a href="{% url 'processing:queue_page' %}">GPU Queue</a>
+      </div>
+    </details>
+    {% endblock %}
+    <span class="spacer"></span>
+    {% include "partials/account_menu.html" %}
+  </nav>
+
+  <main class="content {% block content_class %}narrow{% endblock %}">
+    {% if messages %}
+    <div class="messages" role="status">
+      {% for message in messages %}<div class="message-bar {{ message.tags }}">{{ message }}</div>{% endfor %}
+    </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="statusbar">
+    <span class="message">{% block status %}Ready{% endblock %}</span>
+    {% block light %}{% endblock %}
+  </footer>
+</div>
+{% endblock %}

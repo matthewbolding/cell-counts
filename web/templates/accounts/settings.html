@@ -1,0 +1,68 @@
+{% extends "layouts/app.html" %}
+{% load humanize %}
+{% block title %}Settings — Cell Counts{% endblock %}
+{% block status %}Settings{% endblock %}
+{% block content %}
+<section class="panel">
+  <header><h2>Profile</h2></header>
+  <div class="body">
+    <form method="post">
+      {% csrf_token %}
+      <div class="form-grid">
+        <label>Email:</label><div>{{ user.email }}</div>
+        {% include "account/snippets/form_fields.html" with form=profile_form %}
+      </div>
+      <div class="buttons left"><button type="submit" name="save_profile">Save</button></div>
+    </form>
+  </div>
+</section>
+
+<section class="panel">
+  <header><h2>Email notifications</h2></header>
+  <div class="body">
+    <p class="muted">Choose which processing updates are emailed to you. Security notices (password and
+    two-factor changes, sign-ins from a new device) are always sent.</p>
+    <form method="post">
+      {% csrf_token %}
+      <div class="checks">
+        {% for field in notify_form %}
+        <label>{{ field }}<span>{{ field.label }}<span class="help">{{ field.help_text }}</span></span></label>
+        {% endfor %}
+      </div>
+      <div class="buttons left"><button type="submit" name="save_notifications">Save</button></div>
+    </form>
+  </div>
+</section>
+
+<section class="panel">
+  <header><h2>Storage</h2></header>
+  <div class="body">
+    <p>{{ storage_used|filesizeformat }} of {{ storage_quota|filesizeformat }} used ({{ storage_pct }}%).</p>
+    <meter class="storage" min="0" max="100" low="80" high="95" optimum="0" value="{{ storage_pct }}">{{ storage_pct }}%</meter>
+    <p class="muted spaced">Counts the original images in projects you own, including ones
+    collaborators uploaded. Delete a project to free its space.</p>
+  </div>
+</section>
+
+<section class="panel">
+  <header><h2>Security</h2></header>
+  <div class="body">
+    <div class="buttons left">
+      <a class="button" href="{% url 'account_change_password' %}">Change Password…</a>
+      <a class="button" href="{% url 'mfa_index' %}">Two-Factor Authentication…</a>
+      <a class="button" href="{% url 'usersessions_list' %}">Signed-in Devices…</a>
+    </div>
+    {% if devices %}
+    <h2 class="subheading">Devices you've signed in from</h2>
+    <table class="list">
+      <thead><tr><th>Browser</th><th class="hide-narrow">Network</th><th>Last used</th></tr></thead>
+      <tbody>
+      {% for d in devices %}
+        <tr><td>{{ d.user_agent }}</td><td class="hide-narrow mono">{{ d.network }}</td><td>{{ d.last_seen|naturaltime }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </div>
+</section>
+{% endblock %}

@@ -1,0 +1,22 @@
+{% if user.is_authenticated %}
+<details class="menu right">
+  <summary>{{ user.label }}</summary>
+  <div class="menu-items">
+    <div class="menu-label">{{ user.email }}</div>
+    <hr>
+    <a href="{% url 'accounts:settings' %}">Settings…</a>
+    <a href="{% url 'account_change_password' %}">Change Password…</a>
+    <a href="{% url 'mfa_index' %}">Two-Factor Authentication…</a>
+    <a href="{% url 'usersessions_list' %}">Signed-in Devices…</a>
+    {% if user.is_staff %}
+    <hr>
+    <a href="{% url 'accounts:manage_users' %}">Manage Users…</a>
+    {% endif %}
+    <hr>
+    <form method="post" action="{% url 'account_logout' %}">
+      {% csrf_token %}
+      <button type="submit">Sign Out</button>
+    </form>
+  </div>
+</details>
+{% endif %}

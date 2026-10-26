@@ -1,0 +1,8 @@
+{% extends "layouts/dialog.html" %}
+{% block title %}Waiting for Approval — Cell Counts{% endblock %}
+{% block titlebar %}Cell Counts — Waiting for Approval{% endblock %}
+{% block content %}
+<p>Your email address is confirmed. An administrator still needs to approve your account.</p>
+<p class="muted">You'll get an email as soon as that happens. You can close this page.</p>
+<div class="buttons"><a class="button" href="{% url 'account_login' %}">Back to Sign In</a></div>
+{% endblock %}

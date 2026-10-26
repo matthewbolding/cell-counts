@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% load vite %}
+{% block title %}{{ project.name }} — Cell Counts{% endblock %}
+{% block body_class %}workspace-page{% endblock %}
+{% block head %}
+<meta name="csrf-token" content="{{ csrf_token }}">
+{% vite_entry "src/workspace/main.ts" %}
+{% endblock %}
+{% block body %}
+<div id="workspace"
+     data-project-id="{{ project.id }}"
+     data-projects-url="{% url 'projects:list' %}"
+     data-settings-url="{% url 'projects:settings' project.id %}"
+     data-queue-url="{% url 'processing:queue_page' %}"
+     data-account-settings-url="{% url 'accounts:settings' %}"
+     data-logout-url="{% url 'account_logout' %}"
+     data-manage-url="{% if user.is_staff %}{% url 'accounts:manage_users' %}{% endif %}">
+  <noscript>The review screen needs JavaScript.</noscript>
+</div>
+{% endblock %}

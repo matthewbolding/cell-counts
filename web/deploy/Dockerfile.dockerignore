@@ -1,0 +1,12 @@
+# Build context is web/. Keep local state, secrets and build output out of it.
+.venv
+.data
+.pytest_cache
+**/__pycache__
+**/*.pyc
+staticfiles
+static/dist
+frontend/node_modules
+deploy/.env
+dev.env
+*.sqlite3

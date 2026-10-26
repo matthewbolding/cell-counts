@@ -1,0 +1,8 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}Someone requested access to Cell Counts using this email address. If that was you, confirm the address here:
+
+{{ activate_url }}
+
+An administrator reviews every request after the address is confirmed; you'll get another email once you're approved.
+
+If you didn't request this, you can ignore this email.{% endautoescape %}{% endblock content %}

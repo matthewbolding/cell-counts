@@ -1,0 +1,4 @@
+{% extends "account/email/base_message.txt" %}
+{% block content %}{% autoescape off %}{{ applicant.email }}{% if applicant.display_name %} ({{ applicant.display_name }}){% endif %} confirmed their email address and is waiting for approval.
+
+Review it here: {{ review_url }}{% endautoescape %}{% endblock content %}

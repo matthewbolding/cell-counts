@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1.7
+#
+# Image for `gpu-worker` only: the same app code plus the `gpu` extra (torch,
+# Cellpose) and the Cellpose-SAM weights baked in, so the worker can run on a
+# network with no internet access.
+#
+# No CUDA base image is needed: torch's PyPI wheels pull the CUDA runtime,
+# cuBLAS, cuDNN, … as ordinary pip packages (cu13 for torch 2.14), and the
+# NVIDIA container toolkit injects the host driver at run time. The host driver
+# just has to support that CUDA version (powerhouse: driver 595.91, CUDA 13.2).
+#
+#   docker build -f deploy/Dockerfile.gpu -t cellcounts-gpu .    (from web/)
+
+ARG PYTHON_IMAGE=python:3.13.17-slim-trixie
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.13.5
+
+FROM ${UV_IMAGE} AS uv
+
+FROM ${PYTHON_IMAGE}
+
+ARG APP_UID=1000
+ARG APP_GID=1000
+# Default model of cellpose 4.2.x — the same weights the old compute server has
+# cached, so results match it.
+ARG CELLPOSE_MODEL=cpsam_v2
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH=/opt/venv/bin:$PATH \
+    CELLPOSE_LOCAL_MODELS_PATH=/opt/cellpose/models
+
+COPY --from=uv /uv /usr/local/bin/uv
+
+WORKDIR /app
+COPY pyproject.toml uv.lock ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --no-install-project --extra gpu
+
+# Download the weights now (~1.2 GB), into a world-readable path the non-root
+# runtime user can read but not modify.
+RUN python -c "from cellpose.models import cache_model_path; print(cache_model_path('${CELLPOSE_MODEL}'))" \
+ && chmod -R a+rX /opt/cellpose
+
+COPY . .
+
+RUN (getent group "${APP_GID}" || groupadd --gid "${APP_GID}" app) \
+ && useradd --uid "${APP_UID}" --gid "${APP_GID}" --no-create-home --home-dir /tmp --shell /usr/sbin/nologin app
+
+USER ${APP_UID}:${APP_GID}
+
+CMD ["python", "manage.py", "run_worker", "--resource", "gpu"]

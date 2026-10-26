@@ -1,0 +1,276 @@
+/*
+ * workspace.css — the review screen. Builds on static/css/app.css's tokens and
+ * chrome (menubar, statusbar, buttons) and lays the window out like the
+ * desktop ReviewPanel: toolbar row, then a 210 px left column, the canvas, and a
+ * 200 px right column.
+ */
+
+body.workspace-page { overflow: hidden; }
+
+#workspace {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  height: 100vh;
+  min-width: 900px;
+}
+#workspace.ws-failed { display: block; padding: 24px; }
+
+.menubar .project-name {
+  display: flex;
+  align-items: center;
+  padding-right: 10px;
+  color: var(--text-muted);
+}
+
+.ws {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Toolbar                                                            */
+/* ------------------------------------------------------------------ */
+.ws-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+}
+.ws-toolbar .spacer { flex: 1; }
+.ws-radios { display: inline-flex; gap: 8px; }
+.ws-radios label { display: inline-flex; align-items: center; white-space: nowrap; }
+.ws-radios label:has(input:disabled) { color: #a0a0a0; }
+.ws-label { color: var(--text); }
+.ws-sep {
+  align-self: stretch;
+  width: 1px;
+  margin: 2px 6px;
+  background: var(--border);
+}
+.ws-swatches { display: inline-flex; gap: 4px; }
+.ws-swatch-wrap { position: relative; display: inline-flex; }
+.ws-swatch {
+  min-width: 46px;
+  font-size: 12px;
+  font-weight: 600;
+  border-color: #8a8a8a;
+}
+.ws-swatch:hover:not(:disabled) { filter: brightness(0.95); }
+/* The native color picker anchors to this invisible input under its swatch. */
+.ws-color-input {
+  position: absolute;
+  inset: auto 0 0 0;
+  width: 100%;
+  height: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+.ws-zoom { display: inline-flex; gap: 4px; }
+.ws-zoom button { min-width: 30px; padding: 0 8px; }
+
+/* ------------------------------------------------------------------ */
+/* Main three columns                                                 */
+/* ------------------------------------------------------------------ */
+.ws-main {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr) 200px;
+  min-height: 0;
+}
+.ws-main[hidden] { display: none; }
+
+.ws-left {
+  display: grid;
+  min-height: 0;
+  border-right: 1px solid var(--border);
+}
+.ws-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 8px 8px 4px;
+}
+.ws-pane h2 { margin: 0 0 4px; font-size: 13px; }
+.ws-divider {
+  cursor: row-resize;
+  background: linear-gradient(var(--border), var(--border)) center / 100% 1px no-repeat;
+}
+.ws-divider:hover { background-color: #dcdcdc; }
+
+.ws-rows {
+  flex: 1;
+  min-height: 40px;
+  overflow-y: auto;
+  background: var(--row-bg);
+  border: 1px solid var(--border);
+}
+.ws-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+}
+.ws-row.selected { background: var(--row-selected); }
+.ws-row-label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.ws-row .dot { cursor: pointer; }
+.ws-empty { padding: 8px 6px; color: var(--text-muted); font-size: 12px; }
+
+.ws-queue-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-top: 4px;
+}
+.ws-queue-buttons button { padding: 0; }
+
+/* ------------------------------------------------------------------ */
+/* Center: tabs + canvas                                              */
+/* ------------------------------------------------------------------ */
+.ws-center {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.ws-tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 2px;
+}
+.ws-tabs .ws-sep { margin: 2px 0; }
+.ws-tabs button { min-width: 64px; }
+
+.ws-canvas-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  margin: 4px;
+}
+.ws-canvas-host, .ws-canvas-frame {
+  position: absolute;
+  inset: 0;
+}
+.ws-canvas {
+  display: block;
+  background: var(--canvas-bg);
+  outline: none;
+  touch-action: none;
+}
+.ws-canvas.panning { cursor: grabbing !important; }
+.ws-drop-hint {
+  position: absolute;
+  inset: 12px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 15px;
+  background: rgb(59 125 221 / 0.25);
+  border: 2px dashed #6aa1f0;
+  border-radius: 6px;
+  pointer-events: none;
+}
+.ws-drop-hint.visible { display: flex; }
+
+/* ------------------------------------------------------------------ */
+/* Right panel                                                        */
+/* ------------------------------------------------------------------ */
+.ws-right {
+  min-height: 0;
+  padding: 10px;
+  overflow-y: auto;
+  border-left: 1px solid var(--border);
+}
+.ws-title {
+  margin: 0 0 4px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.ws-counts { margin: 0 0 10px; white-space: pre-line; }
+.ws-notice:empty { display: none; }
+.ws-notice {
+  padding: 6px 8px;
+  font-size: 12px;
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius);
+}
+.ws-right > button { margin-bottom: 10px; }
+.ws-instructions p { color: var(--text-muted); font-size: 12px; }
+.ws-rescan { display: grid; gap: 4px; }
+.ws-rescan[hidden] { display: none; }
+.ws-rescan-nav { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 2px; }
+.ws-rescan .muted { margin-top: 6px; font-size: 12px; }
+
+/* ------------------------------------------------------------------ */
+/* Log pane (View > Show Log)                                         */
+/* ------------------------------------------------------------------ */
+.ws-log {
+  min-height: 0;
+  margin: 8px;
+  padding: 6px 8px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: #ffffff;
+  border: 1px solid var(--border-strong);
+}
+.ws-log[hidden] { display: none; }
+.ws-log-lines div { white-space: pre-wrap; }
+
+/* ------------------------------------------------------------------ */
+/* Dialogs (Toplevel look)                                            */
+/* ------------------------------------------------------------------ */
+dialog.ws-dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 0;
+  color: var(--text);
+  background: var(--panel-bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgb(0 0 0 / 0.2);
+}
+dialog.ws-dialog.wide { width: min(560px, calc(100vw - 32px)); }
+dialog.ws-dialog::backdrop { background: rgb(0 0 0 / 0.18); }
+dialog.ws-dialog .titlebar {
+  padding: 6px 12px;
+  font-weight: 600;
+  text-align: center;
+  background: #e4e4e4;
+  border-bottom: 1px solid var(--border);
+  border-radius: 6px 6px 0 0;
+}
+.ws-dialog-body { padding: 16px 16px 0; }
+.ws-dialog-body > :last-child { margin-bottom: 0; }
+dialog.ws-dialog .buttons { margin: 16px; }
+.ws-dialog-list {
+  max-height: 160px;
+  margin: 0 0 10px;
+  padding: 4px 8px 4px 24px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 12px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+}
+.ws-form { display: grid; gap: 4px; }
+.ws-form label { margin-top: 4px; }
+.ws-form input[type="text"] { width: 100%; }
+.ws-form h3 { margin: 0; font-size: 13px; }
+.ws-form label.check { display: flex; align-items: center; margin-top: 2px; }
+.ws-check-list {
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--row-bg);
+  border: 1px solid var(--border);
+}
+.ws-check-row { display: flex; align-items: center; gap: 4px; padding: 2px 6px; }
+.error-text { color: var(--danger); }

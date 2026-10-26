@@ -1,0 +1,61 @@
+{% extends "layouts/app.html" %}
+{% load humanize %}
+{% block title %}Projects — Cell Counts{% endblock %}
+{% block status %}{{ mine|length }} project{{ mine|length|pluralize }}{% if shared %}, {{ shared|length }} shared with you{% endif %}{% endblock %}
+{% block content %}
+<section class="panel">
+  <header><h2>My projects</h2></header>
+  <table class="list">
+    <thead><tr><th>Name</th><th class="num">Samples</th><th class="num">Processed</th><th class="num hide-narrow">Size</th><th class="hide-narrow">Updated</th><th></th></tr></thead>
+    <tbody>
+    {% for p in mine %}
+      <tr>
+        <td><a href="{% url 'projects:workspace' p.id %}">{{ p.name }}</a></td>
+        <td class="num">{{ p.n_samples }}</td>
+        <td class="num">{{ p.n_done }} / {{ p.n_images }}</td>
+        <td class="num hide-narrow">{{ p.size_bytes|default:0|filesizeformat }}</td>
+        <td class="hide-narrow">{{ p.updated_at|naturaltime }}</td>
+        <td class="actions"><a class="button" href="{% url 'projects:workspace' p.id %}">Open</a> <a class="button" href="{% url 'projects:settings' p.id %}">Settings…</a></td>
+      </tr>
+    {% empty %}
+      <tr class="empty"><td colspan="6">No projects yet. Create one below, then add a folder of images to it.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+{% if shared %}
+<section class="panel">
+  <header><h2>Shared with me</h2></header>
+  <table class="list">
+    <thead><tr><th>Name</th><th>Owner</th><th>Your access</th><th class="num">Processed</th><th class="hide-narrow">Updated</th><th></th></tr></thead>
+    <tbody>
+    {% for p in shared %}
+      <tr>
+        <td><a href="{% url 'projects:workspace' p.id %}">{{ p.name }}</a></td>
+        <td>{{ p.owner.label }}</td>
+        <td>{% if p.my_role == "editor" %}Editor{% else %}Viewer{% endif %}</td>
+        <td class="num">{{ p.n_done }} / {{ p.n_images }}</td>
+        <td class="hide-narrow">{{ p.updated_at|naturaltime }}</td>
+        <td class="actions"><a class="button" href="{% url 'projects:workspace' p.id %}">Open</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="panel" id="new-project">
+  <header><h2>New project</h2></header>
+  <div class="body">
+    <p class="muted">A project holds one folder's worth of samples — the web version of opening a folder in the
+    desktop app. You'll add the images from inside the project.</p>
+    <form method="post" class="inline-form">
+      {% csrf_token %}
+      <label for="new-project-name">Name:</label>
+      <input id="new-project-name" type="text" name="name" maxlength="120" required autocomplete="off">
+      <button type="submit" class="default">Create Project</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

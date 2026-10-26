@@ -1,0 +1,19 @@
+{% extends "layouts/dialog.html" %}
+{% block title %}Request Access — Cell Counts{% endblock %}
+{% block titlebar %}Cell Counts — Request Access{% endblock %}
+{% block dialog_class %}wide{% endblock %}
+{% block content %}
+<p class="muted">Every account is reviewed by an administrator. After you confirm your email address,
+you'll get another email once your access is approved.</p>
+<form method="post" action="{% url 'account_signup' %}">
+  {% csrf_token %}
+  {{ redirect_field }}
+  <div class="form-grid">
+    {% include "account/snippets/form_fields.html" with form=form %}
+  </div>
+  <div class="buttons"><button type="submit" class="default">Request Access</button></div>
+</form>
+<div class="footer-links">
+  <a href="{% url 'account_login' %}">Already have an account? Sign in</a>
+</div>
+{% endblock %}

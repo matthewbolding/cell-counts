@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block body %}
+<div class="dialog-page">
+  <div class="dialog {% block dialog_class %}{% endblock %}" role="main">
+    <div class="titlebar">{% block titlebar %}Cell Counts{% endblock %}</div>
+    <div class="body">
+      {% if messages %}
+      <div class="messages" role="status">
+        {% for message in messages %}<div class="message-bar {{ message.tags }}">{{ message }}</div>{% endfor %}
+      </div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </div>
+  </div>
+</div>
+{% endblock %}

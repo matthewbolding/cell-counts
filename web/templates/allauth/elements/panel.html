@@ -1,0 +1,7 @@
+{% load allauth %}<section class="panel">
+  <header><h2>{% slot title %}{% endslot %}</h2></header>
+  <div class="body">
+    {% slot body %}{% endslot %}
+    {% if slots.actions %}<div class="buttons left">{% for action in slots.actions %}{{ action }}{% endfor %}</div>{% endif %}
+  </div>
+</section>
