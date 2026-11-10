@@ -12,8 +12,8 @@ browser ── Cloudflare ── tunnel ── cloudflared ── nginx ── w
                                                       backup      (nightly pg_dump to the NAS)
 ```
 
-No container publishes a port on the host. Files live on the NAS, mounted at `/mnt/cellcounts` on the host and at
-`/data` in the containers. The database lives on the server's own disk.
+No container publishes a port on the host. Files live on the NAS: the share is mounted at `/mnt/cellcounts` on the
+host, and its `app/` folder is `/data` in the containers. The database lives on the server's own disk.
 
 The server needs Docker with Compose v2, an NVIDIA GPU with the NVIDIA container toolkit (the GPU image ships
 torch's CUDA 13 wheels, so the driver must support CUDA 13), and `nfs-common`. In the commands below, `<nas>` is
@@ -37,11 +37,18 @@ echo '<nas>:/mnt/user/cellcounts /mnt/cellcounts nfs4 rw,hard,noatime,_netdev,no
   | sudo tee -a /etc/fstab
 sudo systemctl daemon-reload
 sudo mount /mnt/cellcounts
-touch /mnt/cellcounts/.cellcounts-volume
+mkdir -p /mnt/cellcounts/app && touch /mnt/cellcounts/app/.cellcounts-volume
 ```
 
+**Why `app/` and not the share itself:** Unraid sometimes invalidates the NFS handle of a share's top folder (a
+"stale file handle") while everything inside it keeps working. Docker checks a bind mount's source when it starts a
+container, and since Docker 29.9.3 that check fails on a stale top folder, which keeps every container that uses the
+NAS from starting (it took the site down on 2026-11-06). A folder one level down isn't affected. On the Unraid side,
+**Settings → NFS → Tunable (fuse_remember)** set to `-1` makes these stale handles much rarer.
+
 **About `.cellcounts-volume`:** the app refuses to read or write files unless this marker is present. If the NFS
-mount ever fails to come up after a reboot, `/mnt/cellcounts` is just an empty folder on the local disk. Without
+mount ever fails to come up after a reboot, `/mnt/cellcounts/app` doesn't exist and Docker would create an empty
+folder on the local disk. Without
 the marker check, uploads would quietly fill the server's disk instead of the NAS. With it, uploads fail with a
 clear "storage unavailable" error and `/healthz` reports the problem. Create the marker once, on the NAS itself
 (the command above does that), and never on the local disk.
@@ -130,7 +137,7 @@ again.
 
 ## 4. Backups and restore
 
-Everything lands in `/mnt/cellcounts/backups/` on the NAS:
+Everything lands in `/mnt/cellcounts/app/backups/` on the NAS:
 
 | What | Written | Kept |
 |------|---------|------|
@@ -150,7 +157,7 @@ on the NAS, and researchers keep their own originals; tiles can always be rebuil
 - **Practise a restore:** `sh restore-drill.sh` rebuilds the database from the newest base backup plus the archived
   WAL in a throwaway container with no network, and compares it with the live one. Nothing live is touched.
 - **Off-site:** the NAS sits next to the server, so it doesn't protect against a fire or theft. If that matters, copy
-  `/mnt/cellcounts/backups` elsewhere regularly (e.g. `rclone sync` to Cloudflare R2 or Backblaze B2 from cron).
+  `/mnt/cellcounts/app/backups` elsewhere regularly (e.g. `rclone sync` to Cloudflare R2 or Backblaze B2 from cron).
 
 **Restore to the latest moment, or to an earlier one.** These are the steps `restore-drill.sh` runs, applied to the
 real database volume:
@@ -160,11 +167,11 @@ cd ~/cell-counts/web/deploy
 docker compose stop web cpu-worker gpu-worker backup db
 
 # Keep the current database aside first, in case you want it back.
-docker run --rm -v cellcounts_pgdata:/from:ro -v /mnt/cellcounts/backups:/to postgres:17.11-trixie \
+docker run --rm -v cellcounts_pgdata:/from:ro -v /mnt/cellcounts/app/backups:/to postgres:17.11-trixie \
     tar -czf "/to/pgdata-before-restore-$(date +%Y%m%d-%H%M%S).tar.gz" -C /from .
 
 # Replace it with the newest base backup (or choose an older backups/base/<stamp>).
-BASE=$(ls -1d /mnt/cellcounts/backups/base/2* | sort | tail -n 1)
+BASE=$(ls -1d /mnt/cellcounts/app/backups/base/2* | sort | tail -n 1)
 docker run --rm -v cellcounts_pgdata:/data -v "$BASE":/base:ro postgres:17.11-trixie sh -c '
     find /data -mindepth 1 -delete &&
     tar -xzf /base/base.tar.gz -C /data && tar -xzf /base/pg_wal.tar.gz -C /data/pg_wal &&
@@ -193,7 +200,7 @@ cd ~/cell-counts/web/deploy
 docker compose stop web cpu-worker gpu-worker
 docker compose exec -T db pg_restore --clean --if-exists --no-owner \
     -U "$(grep ^POSTGRES_USER .env | cut -d= -f2)" -d "$(grep ^POSTGRES_DB .env | cut -d= -f2)" \
-    < /mnt/cellcounts/backups/cellcounts-YYYYMMDD-HHMMSS.dump
+    < /mnt/cellcounts/app/backups/cellcounts-YYYYMMDD-HHMMSS.dump
 docker compose start web cpu-worker gpu-worker
 ```
 

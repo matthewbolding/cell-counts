@@ -12,7 +12,7 @@ env_value() { sed -n "s/^$1=//p" .env | tail -n 1; }
 DB_USER=$(env_value POSTGRES_USER)
 DB_NAME=$(env_value POSTGRES_DB)
 NAS=$(env_value NAS_MOUNT)
-BACKUPS=${NAS:-/mnt/cellcounts}/backups
+BACKUPS=${NAS:-/mnt/cellcounts/app}/backups
 IMAGE=postgres:17.11-trixie
 NAME=cellcounts-restore-drill
 
