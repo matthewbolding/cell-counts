@@ -215,6 +215,24 @@ docker compose start web cpu-worker gpu-worker
 | Logs | `docker compose logs -f web cpu-worker gpu-worker` |
 | GPU | `nvidia-smi`, or **View → GPU Queue** in the app |
 | Disk | `df -h /mnt/cellcounts`; per-user usage on **Manage Users…** |
+| Restarts by the watchdog | `journalctl -t cellcounts` |
+
+### Keeping it running
+
+Docker restarts the containers after a reboot, but if one can't start (the NAS not mounted yet, a stale NFS handle)
+it gives up on that container for good. `deploy/ensure-running.sh` starts whatever isn't running, and waits while
+the NAS is unavailable. Run it from your crontab (`crontab -e`, no sudo needed):
+
+```
+@reboot sleep 90 && sh $HOME/cell-counts/web/deploy/ensure-running.sh
+*/5 * * * * sh $HOME/cell-counts/web/deploy/ensure-running.sh
+```
+
+Stopping services on purpose? `touch ~/cell-counts/web/deploy/.hold` first so the watchdog leaves them alone, and
+remove it afterwards.
+
+To hear about outages, point an external monitor (UptimeRobot or Better Stack, both free) at
+`https://cellcounts.matthewbolding.com/healthz` and have it check for `"storage": true`.
 
 ---
 

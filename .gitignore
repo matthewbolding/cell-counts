@@ -37,3 +37,4 @@ web/static/dist/
 web/frontend/node_modules/
 web/deploy/.env
 web/deploy/tunnel.env
+web/deploy/.hold
